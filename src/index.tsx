@@ -862,6 +862,59 @@ app.get('/api/stats', (c) => {
   return c.json(stats)
 })
 
+// ---- TEMPLATE DATA & API ----
+const TEMPLATE_CONTENT: Record<string, { title: string; description: string; format: string; content: string }> = {
+  // SOP-000 Templates
+  'Entity Comparison Matrix': { title: 'Entity Comparison Matrix', format: 'Reference Chart', description: 'Side-by-side comparison of all business entity types with pros, cons, liability, taxation, and use cases.', content: `ENTITY COMPARISON MATRIX — RJ Business Solutions 2026\n\n| Feature | Sole Prop | LLC | S-Corp | C-Corp | Series LLC | PBC |\n|---------|-----------|-----|--------|--------|------------|-----|\n| Liability Protection | None | Full | Full | Full | Per-Series | Full |\n| Formation Cost | $0-50 | $50-500 | $100-800 | $100-800 | $200-1000 | $100-800 |\n| Annual Maintenance | Minimal | Low-Med | Medium | High | Medium | High |\n| Taxation | Pass-thru | Flexible | Pass-thru | Double | Flexible | Double |\n| Best For | Freelancers | Small Biz | Profitable SMBs | VC-backed | Multi-brand | Social impact |\n| Ownership Limit | 1 | Unlimited | 100 S/H | Unlimited | Unlimited | Unlimited |\n| Can Raise VC? | No | Difficult | No | Yes | Difficult | Yes |\n| Self-Employment Tax | Yes | Yes* | Reduced | N/A | Yes* | N/A |\n\n* LLC members may reduce SE tax via S-Corp election\n\n2026 UPDATE: Series LLC now recognized in 21 states (up from 19).\nDelaware franchise tax: $300 (LLC), $450+ (Corp).\nWyoming annual fee: $60 — most cost-effective jurisdiction.` },
+  'Strategic Decision Tree': { title: 'Strategic Decision Tree', format: 'Decision Framework', description: 'Guided decision framework for selecting the optimal business structure based on your specific situation.', content: `STRATEGIC DECISION TREE — Business Entity Selection\n\nSTART HERE:\n\nQ1: Will you have outside investors (VC/Angel)?\n  → YES → C-Corporation (Delaware)\n  → NO → Continue to Q2\n\nQ2: Expected annual revenue?\n  → Under $50K → Sole Proprietorship or Single-Member LLC\n  → $50K-$200K → LLC (Home State or Wyoming)\n  → Over $200K → Continue to Q3\n\nQ3: Will you have partners/co-founders?\n  → YES → Multi-Member LLC with Operating Agreement\n  → NO → Continue to Q4\n\nQ4: Annual profit exceeds $80K?\n  → YES → LLC with S-Corp Election (save on SE tax)\n  → NO → Standard LLC\n\nQ5: Multiple business lines or brands?\n  → YES → Series LLC (if in recognized state) or Holding Company structure\n  → NO → Single LLC\n\nQ6: Need maximum asset protection?\n  → YES → Wyoming LLC (strongest charging order protection)\n  → MODERATE → Delaware LLC\n  → BASIC → Home State LLC\n\n2026 NOTE: BOI reporting under Corporate Transparency Act paused by courts as of March 2026.` },
+  'Incorporation Checklist': { title: 'Incorporation Checklist', format: 'Checklist', description: 'Step-by-step incorporation checklist with deadlines and responsible parties.', content: `INCORPORATION CHECKLIST — RJ Business Solutions\n\n□ 1. ENTITY SELECTION\n  □ Complete Strategic Decision Tree\n  □ Consult with attorney/CPA if needed\n  □ Document decision rationale\n\n□ 2. NAME & BRANDING\n  □ Check state name availability\n  □ Search USPTO TESS for trademark conflicts\n  □ Check domain availability\n  □ Check social media handle availability\n  □ Reserve name with state (if filing later)\n\n□ 3. REGISTERED AGENT\n  □ Select registered agent service\n  □ Confirm acceptance and payment\n  □ Record agent details for filing\n\n□ 4. STATE FILING\n  □ Complete Articles of Organization/Incorporation\n  □ Pay filing fee\n  □ File with Secretary of State\n  □ Receive and store approved filing\n\n□ 5. EIN & BANKING\n  □ Apply for EIN (IRS.gov — instant)\n  □ Open business checking account\n  □ Open business savings account\n\n□ 6. GOVERNANCE\n  □ Draft Operating Agreement or Bylaws\n  □ Execute organizational consent\n  □ Set up corporate records binder\n\n□ 7. COMPLIANCE\n  □ Set compliance calendar reminders\n  □ Register for state taxes\n  □ Obtain business licenses/permits\n  □ Foreign qualify in states with nexus` },
+  'Operating Agreement Template': { title: 'Operating Agreement Template', format: 'Legal Template', description: 'Comprehensive LLC Operating Agreement with all 8 essential sections.', content: `OPERATING AGREEMENT TEMPLATE — [Company Name] LLC\n\nTHIS OPERATING AGREEMENT is entered into as of [Date]\nby the Members listed in Exhibit A.\n\nSECTION 1: ORGANIZATION\n1.1 Name: [Company Name] LLC\n1.2 Registered Agent: [Agent Name/Service]\n1.3 Principal Office: [Address]\n1.4 Purpose: [Describe business purpose]\n1.5 Term: Perpetual unless dissolved per Section 8\n\nSECTION 2: MEMBERS & CAPITAL\n2.1 Members: See Exhibit A\n2.2 Capital Contributions: See Exhibit B\n2.3 Additional Contributions: By unanimous consent only\n2.4 No Interest on Capital: Unless otherwise agreed\n\nSECTION 3: PROFIT/LOSS ALLOCATION\n3.1 Allocation: Pro rata based on membership interests\n3.2 Distributions: As determined by managing member(s)\n3.3 Tax Distributions: Minimum distributions for tax obligations\n\nSECTION 4: MANAGEMENT\n4.1 Management Structure: [Member-managed / Manager-managed]\n4.2 Voting: Majority vote for ordinary business; Supermajority (75%) for major decisions\n4.3 Officers: [List officers if applicable]\n\nSECTION 5: TRANSFER RESTRICTIONS\n5.1 Right of First Refusal: Required\n5.2 Prohibited Transfers: Without consent\n5.3 Valuation Method: [Fair market / Book value / Formula]\n\nSECTION 6: DISSOLUTION\n6.1 Events of Dissolution\n6.2 Winding Up Procedures\n6.3 Distribution of Assets\n\nSECTION 7: DISPUTE RESOLUTION\n7.1 Mediation first, then binding arbitration\n\nSECTION 8: MISCELLANEOUS\n8.1 Amendments: Written consent of [majority/all] members\n8.2 Governing Law: [State]\n8.3 Severability clause\n8.4 Entire agreement clause\n\n[Signature blocks for all members]\n\n⚠️ IMPORTANT: This is a template. Have an attorney review before execution.` },
+  'Bylaws Template': { title: 'Bylaws Template', format: 'Legal Template', description: 'Corporate Bylaws template covering governance, meetings, officers, and shareholder rights.', content: `CORPORATE BYLAWS TEMPLATE — [Corporation Name]\n\nARTICLE I: OFFICES\n1.1 Principal Office\n1.2 Registered Office and Agent\n\nARTICLE II: SHAREHOLDERS\n2.1 Annual Meeting\n2.2 Special Meetings\n2.3 Notice Requirements (10-60 days)\n2.4 Quorum (majority of shares)\n2.5 Voting (one vote per share)\n2.6 Proxy Voting\n\nARTICLE III: BOARD OF DIRECTORS\n3.1 Number and Qualifications\n3.2 Election and Term\n3.3 Regular and Special Meetings\n3.4 Quorum and Voting\n3.5 Committees\n3.6 Compensation\n3.7 Removal and Vacancies\n\nARTICLE IV: OFFICERS\n4.1 Required: President, Secretary, Treasurer\n4.2 Optional: VP, CFO, COO\n4.3 Duties of Each Officer\n4.4 Removal and Succession\n\nARTICLE V: STOCK\n5.1 Certificates\n5.2 Transfer Restrictions\n5.3 Record Date\n5.4 Lost Certificates\n\nARTICLE VI: INDEMNIFICATION\n6.1 Scope of Indemnification\n6.2 Advancement of Expenses\n6.3 D&O Insurance\n\nARTICLE VII: AMENDMENTS\n7.1 By Board or Shareholders\n\n⚠️ TEMPLATE — Requires legal review before adoption.` },
+  'Organizational Consent Template': { title: 'Organizational Consent Template', format: 'Legal Template', description: 'Written consent of incorporator/organizer for initial company actions.', content: `WRITTEN CONSENT OF INCORPORATOR\nIN LIEU OF ORGANIZATIONAL MEETING\n\nThe undersigned, being the sole incorporator of [Company Name],\nhereby takes the following actions:\n\n1. ADOPTION OF BYLAWS/OPERATING AGREEMENT\n   RESOLVED: The [Bylaws/Operating Agreement] attached as Exhibit A\n   are hereby adopted.\n\n2. ELECTION OF DIRECTORS/MANAGERS\n   RESOLVED: The following persons are elected as initial [Directors/Managers]:\n   - [Name 1]\n   - [Name 2]\n\n3. APPOINTMENT OF OFFICERS\n   RESOLVED: The following officers are appointed:\n   - President/CEO: [Name]\n   - Secretary: [Name]\n   - Treasurer/CFO: [Name]\n\n4. BANKING\n   RESOLVED: [Bank Name] is designated as the company depository.\n   [Officer name(s)] authorized as signatories.\n\n5. EIN\n   RESOLVED: Officers authorized to apply for federal EIN.\n\n6. FISCAL YEAR\n   RESOLVED: Calendar year (Jan 1 - Dec 31).\n\n7. STOCK/MEMBERSHIP ISSUANCE\n   RESOLVED: [Number] shares/units issued to [Members/Shareholders]\n   per Exhibit B.\n\nDate: _______________\nSignature: _______________\nPrinted Name: _______________` },
+
+  // SOP-601 FCRA Templates
+  'FCRA Dispute Letter (Bureau)': { title: 'FCRA Dispute Letter (Bureau)', format: 'Legal Letter', description: 'FCRA-compliant dispute letter template for credit bureau disputes. Updated for 2026.', content: `[Your Name]\n[Your Address]\n[City, State ZIP]\n[Date]\n\nVIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED\n\n[Bureau Name]\n[Bureau Address]\n\nRe: Dispute of Inaccurate Information\n    Social Security Number: XXX-XX-[last 4]\n\nDear Sir/Madam:\n\nPursuant to the Fair Credit Reporting Act, 15 U.S.C. § 1681i,\nI am writing to dispute the following inaccurate information\non my credit report:\n\nACCOUNT DISPUTED:\n  Creditor Name: [Name]\n  Account Number: [Number]\n  Reported Balance: [Amount]\n  Reason for Dispute: [Specific reason — e.g., "This account\n  shows a balance of $1,500 but was paid in full on MM/DD/YYYY"]\n\nUNDER THE FCRA, you are required to:\n1. Conduct a reasonable investigation (§1681i(a))\n2. Forward all relevant information to the furnisher (§1681i(a)(2))\n3. Complete your investigation within 30 days (§1681i(a)(1))\n4. Promptly delete or modify inaccurate information (§1681i(a)(5))\n\nEnclosed: [List supporting documents]\n\nPlease investigate this matter and correct my credit report.\n\nSincerely,\n[Signature]\n[Printed Name]\n\nEnclosures:\n- Copy of credit report with disputed item highlighted\n- [Supporting documentation]\n- Copy of government-issued ID\n- Proof of address\n\n2026 NOTE: File disclosure max charge is now $16.00.` },
+  'FCRA Dispute Letter (Furnisher)': { title: 'FCRA Dispute Letter (Furnisher)', format: 'Legal Letter', description: 'Direct dispute letter to creditors/furnishers under FCRA Section 623.', content: `[Your Name]\n[Your Address]\n[City, State ZIP]\n[Date]\n\nVIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED\n\n[Creditor/Furnisher Name]\n[Compliance Department]\n[Address]\n\nRe: Direct Dispute Under FCRA § 623\n    Account Number: [Account Number]\n\nDear Compliance Officer:\n\nPursuant to the Fair Credit Reporting Act, 15 U.S.C. § 1681s-2(b),\nI am notifying you that the information you are furnishing to\ncredit reporting agencies regarding the above-referenced account\nis inaccurate.\n\nSPECIFIC INACCURACY:\n[Describe exactly what is wrong]\n\nCORRECT INFORMATION:\n[State what the information should be]\n\nAs a furnisher, you are required to:\n1. Conduct an investigation with respect to the disputed information\n2. Review all relevant information provided\n3. Report the results to all CRAs to which you reported\n4. If found inaccurate, modify, delete, or permanently block\n\nI request that you:\n□ Investigate this dispute\n□ Correct the reported information\n□ Notify all three credit bureaus of the correction\n\nEnclosed: [Supporting documentation]\n\nSincerely,\n[Signature]` },
+  'Method of Verification Request': { title: 'Method of Verification Request', format: 'Legal Letter', description: 'Request to credit bureau for details on how disputed information was verified.', content: `[Your Name]\n[Your Address]\n[Date]\n\nVIA CERTIFIED MAIL\n\n[Bureau Name]\n[Address]\n\nRe: Request for Method of Verification\n    Reference/Dispute Number: [Number]\n\nDear Sir/Madam:\n\nI recently received your response to my dispute dated [Date]\nin which you stated the disputed information was "verified."\n\nPursuant to FCRA § 1681i(a)(6)(B)(iii), I am requesting:\n\n1. The SPECIFIC METHOD used to verify this information\n2. The name, address, and phone number of the person contacted\n   at the furnisher\n3. The specific documents or records reviewed\n4. The dates the investigation was conducted\n\nThe FCRA requires you to provide this information upon request.\nA generic response stating "verified by creditor" is insufficient\nand does not meet the standard of reasonable investigation.\n\nIf you cannot provide specific verification details, the disputed\ninformation must be deleted from my credit report per FCRA\n§ 1681i(a)(5)(A).\n\nPlease respond within 15 business days.\n\nSincerely,\n[Signature]` },
+  'CFPB Complaint Template': { title: 'CFPB Complaint Template', format: 'Complaint Form Guide', description: 'Step-by-step guide for filing an effective CFPB complaint.', content: `CFPB COMPLAINT FILING GUIDE — RJ Business Solutions\n\nFILE AT: consumerfinance.gov/complaint\n\nSTEP 1: SELECT PRODUCT\n→ Credit reporting\n\nSTEP 2: SELECT ISSUE\n→ "Incorrect information on your report"\n  OR "Problem with a credit reporting company's investigation"\n\nSTEP 3: WRITE YOUR NARRATIVE (Template):\n\n"I disputed [specific item] with [Bureau] on [Date] via certified\nmail (tracking: [number]). The dispute was based on [specific\nreason — e.g., incorrect balance, account not mine, dates wrong].\n\nThe bureau responded on [Date] stating the information was\n'verified.' However, [explain why the verification was inadequate\n— e.g., the bureau did not conduct a reasonable investigation,\nthe furnisher provided no documentation].\n\nI have enclosed [supporting documents] proving the information\nis inaccurate. Despite my dispute, the inaccurate information\nremains on my credit report, causing [harm — e.g., higher\ninterest rates, denied credit].\n\nI request immediate correction and ask the CFPB to investigate\nthis matter."\n\nSTEP 4: ATTACH DOCUMENTS\n□ Copy of original dispute letter\n□ Certified mail receipt\n□ Bureau response letter\n□ Supporting evidence\n□ Credit report pages\n\n2026 NOTE: CFPB complaints remain effective for individual cases\neven with reduced enforcement actions.` },
+  'Consumer Rights Disclosure': { title: 'Consumer Rights Disclosure', format: 'Compliance Document', description: 'Required consumer rights disclosure under CROA and FCRA.', content: `CONSUMER RIGHTS DISCLOSURE\nRJ Business Solutions\n\nAs required by federal law, you have the following rights:\n\nUNDER THE CREDIT REPAIR ORGANIZATIONS ACT (CROA):\n\n1. RIGHT TO SELF-HELP: You have the right to dispute inaccurate\n   information on your credit report directly with credit bureaus\n   at NO COST to you. You do not need a credit repair company.\n\n2. RIGHT TO CANCEL: You have the right to cancel this contract\n   within THREE (3) BUSINESS DAYS from the date you sign it,\n   without paying any fees.\n\n3. NO ADVANCE PAYMENT: Under federal law, no credit repair\n   organization may charge you any fee until services have\n   been fully performed.\n\nUNDER THE FAIR CREDIT REPORTING ACT (FCRA):\n\n1. You have the right to obtain a free credit report from each\n   bureau weekly at AnnualCreditReport.com.\n\n2. You have the right to dispute inaccurate information directly\n   with credit bureaus.\n\n3. Credit bureaus must investigate your dispute within 30 days\n   (45 days if you provide additional information).\n\n4. As of January 1, 2026, the maximum charge for a file\n   disclosure is $16.00.\n\n5. You may file complaints with the CFPB (consumerfinance.gov)\n   or the FTC (ftc.gov).\n\n⚠️ Any credit repair company that asks you to pay upfront\n   is violating federal law.\n\nDate: __________\nClient Signature: __________` },
+  'Staff Training Checklist': { title: 'Staff Training Checklist', format: 'Checklist', description: 'Quarterly FCRA compliance training checklist for all staff.', content: `FCRA COMPLIANCE TRAINING CHECKLIST\nQuarter: [Q1/Q2/Q3/Q4] 2026\n\nTRAINING TOPICS — ALL STAFF MUST COMPLETE:\n\n□ 1. FCRA Overview & Key Provisions\n  □ Permissible purposes (§604)\n  □ Consumer dispute rights (§611)\n  □ Furnisher obligations (§623)\n  □ File disclosure requirements (§612)\n  □ 2026 update: Max disclosure fee $16.00\n\n□ 2. CROA Requirements\n  □ No advance payment rule\n  □ Written contract requirements\n  □ 3-day cancellation right\n  □ Required disclosures\n\n□ 3. 2026 Regulatory Updates\n  □ CFPB medical debt rule vacated (July 2025)\n  □ CFPB FCRA preemption rule (Oct 2025)\n  □ New state privacy laws (IN, KY, RI)\n  □ Proposed CROA amendments (S.4144)\n\n□ 4. Dispute Procedures\n  □ Proper dispute documentation\n  □ Certified mail requirements\n  □ Response tracking procedures\n  □ Escalation protocols\n\n□ 5. Data Security\n  □ GLBA requirements\n  □ Client data handling\n  □ Encryption standards\n  □ Breach response plan\n\nTRAINING COMPLETED:\n  Employee Name: ______________\n  Date: ______________\n  Score: ____/100 (Must score >80%)\n  Trainer: ______________\n  Next Training Due: ______________` },
+
+  // SOP-602 CROA Templates
+  'Client Service Agreement (CROA-Compliant)': { title: 'Client Service Agreement (CROA-Compliant)', format: 'Legal Contract', description: 'Full CROA-compliant client service agreement template.', content: `CLIENT SERVICE AGREEMENT\nRJ Business Solutions\n\nTHIS AGREEMENT is between RJ Business Solutions ("Company")\nand ____________________ ("Client").\n\n1. SERVICES TO BE PERFORMED:\n   Company will analyze Client's credit reports and assist in\n   preparing and submitting disputes for inaccurate, erroneous,\n   or unverifiable information to credit bureaus and/or furnishers.\n\n2. SPECIFIC SERVICES:\n   □ Credit report analysis (all 3 bureaus)\n   □ Dispute plan creation\n   □ Dispute letter preparation and mailing\n   □ Bureau response tracking\n   □ Monthly progress reports\n   □ Ongoing guidance and support\n\n3. PERFORMANCE TIMELINE:\n   Initial analysis: Within 7 business days\n   First dispute round: Within 14 business days\n   Subsequent rounds: 30-day cycles\n   Estimated program duration: 3-6 months\n\n4. TOTAL COST:\n   Monthly service fee: $_____ per month\n   PAYMENT IS DUE ONLY AFTER SERVICES ARE PERFORMED\n   No advance payments are collected.\n\n5. YOUR RIGHT TO CANCEL:\n   ★ YOU HAVE THE RIGHT TO CANCEL THIS CONTRACT WITHIN\n   THREE (3) BUSINESS DAYS FROM THE DATE YOU SIGN.\n   To cancel, send written notice to [Company Address].\n\n6. CONSUMER RIGHTS DISCLOSURE:\n   [Full CROA disclosure attached — see Consumer Rights Disclosure]\n\n7. NO GUARANTEES:\n   Company cannot and does not guarantee specific credit score\n   improvements or the removal of any particular item.\n\nClient Signature: _________________ Date: _________\nCompany Rep: ____________________ Date: _________\n\n⚠️ 2026 COMPLIANCE NOTE: Review for state-specific addendums.` },
+  'CROA Disclosure Statement': { title: 'CROA Disclosure Statement', format: 'Compliance Document', description: 'Mandatory CROA disclosure that must be provided before contract signing.', content: `DISCLOSURE STATEMENT\nRequired by the Credit Repair Organizations Act\n15 U.S.C. §1679c\n\nBEFORE YOU SIGN A CONTRACT WITH A CREDIT REPAIR ORGANIZATION,\nYOU SHOULD KNOW:\n\n1. Your Right to Dispute Directly:\n   You have the right to dispute inaccurate information in your\n   credit report by contacting the credit bureau directly. You\n   do not need to pay anyone to do this for you.\n\n2. Free Credit Reports:\n   You are entitled to free weekly credit reports from all three\n   bureaus at AnnualCreditReport.com.\n\n3. No Advance Payment:\n   Under federal law, credit repair organizations cannot require\n   you to pay until they have completed the services they promised.\n\n4. Right to Cancel:\n   You may cancel your contract with any credit repair organization\n   for any reason within 3 business days from the date you signed it.\n\n5. Right to Sue:\n   You have a right to sue a credit repair organization that\n   violates the Credit Repair Organizations Act.\n\nI acknowledge that I have read and understand this disclosure.\n\nClient Signature: ________________ Date: __________\nPrinted Name: ___________________` },
+  'Cancellation Request Form': { title: 'Cancellation Request Form', format: 'Form', description: 'Client cancellation request form complying with CROA 3-day right.', content: `NOTICE OF CANCELLATION\n\nDate: _______________\n\nTo: RJ Business Solutions\n    [Company Address]\n\nI hereby cancel the Credit Repair Service Agreement\ndated _____________ between myself and RJ Business Solutions.\n\nI understand that:\n□ This cancellation is within the 3-business-day period\n  (no fees owed)\n□ This cancellation is after the 3-business-day period\n  (prorated fees may apply for services already performed)\n\nClient Name: _________________\nClient Signature: ______________\nDate Signed: _________________\nAccount/Client ID: _____________\n\nFOR COMPANY USE ONLY:\n□ Cancellation received on: __________\n□ Within 3-day window: Yes / No\n□ Refund required: Yes / No\n□ Amount to refund: $__________\n□ Refund processed on: __________\n□ Services ceased on: __________\n\nProcessed by: _________________\nDate: ________________________` },
+  '3-Day Right to Cancel Notice': { title: '3-Day Right to Cancel Notice', format: 'Legal Notice', description: 'Required notice informing clients of their 3-day cancellation right.', content: `NOTICE: YOUR RIGHT TO CANCEL\n\nYou may CANCEL this contract WITHOUT any penalty or obligation\nwithin THREE (3) BUSINESS DAYS from the date you sign.\n\nTo cancel, mail or deliver a signed copy of this notice\nto:\n\n  RJ Business Solutions\n  [Address]\n  [City, State ZIP]\n\nI HEREBY CANCEL THIS TRANSACTION.\n\nDate: _________________\n\nClient Signature: _________________\n\nPrinted Name: _________________\n\n\n(This form must be provided to the client at time of contract\nexecution per CROA § 1679e)` },
+  'State Compliance Addendum': { title: 'State Compliance Addendum', format: 'Legal Addendum', description: 'State-specific compliance addendum library for credit repair contracts.', content: `STATE COMPLIANCE ADDENDUM LIBRARY\n2026 Edition\n\n-- CALIFORNIA --\n□ Must be registered with CA DOJ\n□ $100,000 surety bond required\n□ AB 316 (2026): AI liability — cannot claim AI autonomously caused harm\n□ SB 82 (2026): Arbitration limited to subject goods/services\n□ AB 1075 (2026): Overdraft fees capped at $14\n\n-- TEXAS --\n□ Must be registered with TX SOS\n□ $10,000 surety bond required\n□ Must include specific TX disclosures in contract\n\n-- GEORGIA --\n□ Must register with GA SOS\n□ $25,000 surety bond required\n□ Detailed record keeping requirements\n\n-- NEW YORK --\n□ Must be licensed by NY DFS\n□ Strict advertising restrictions\n□ Enhanced cancellation protections\n\n-- FLORIDA --\n□ Must register with FL DBPR\n□ $10,000 surety bond\n□ Annual renewal required\n\n-- OREGON (NEW 2026) --\n□ SB 605: Medical debt reporting banned effective Jan 1, 2026\n□ Cannot include medical debt in credit repair disputes\n\n-- INDIANA (NEW 2026) --\n□ SB 5: Consumer Data Protection Act effective Jan 1, 2026\n□ Must comply with data handling requirements\n\n-- KENTUCKY (NEW 2026) --\n□ HB 15: Consumer Data Protection Act effective Jan 1, 2026\n\n-- RHODE ISLAND (NEW 2026) --\n□ SB 2500: Data Transparency and Privacy Protection Act effective Jan 1, 2026\n\nReview state requirements BEFORE serving clients in any state.\nUpdate this addendum quarterly.` },
+
+  // Generic/shared templates
+  'Business Validation Report': { title: 'Business Validation Report', format: 'Report Template', description: 'Template for documenting business concept validation results.', content: `BUSINESS VALIDATION REPORT\n\n1. EXECUTIVE SUMMARY\n   Business Concept: _______________\n   Validation Period: _______________\n   Recommendation: GO / NO-GO / PIVOT\n\n2. MARKET SIZE\n   TAM: $_______________\n   SAM: $_______________\n   SOM: $_______________\n   Data Sources: _______________\n\n3. COMPETITOR ANALYSIS\n   (Minimum 5 competitors analyzed)\n   [Table: Name | Price | Strengths | Weaknesses | Market Share]\n\n4. CUSTOMER VALIDATION\n   Total Responses: ____\n   Conversion Rate: ____%\n   Key Insights: _______________\n\n5. FINANCIAL VIABILITY\n   Estimated Revenue (Y1): $___\n   Estimated Costs (Y1): $___\n   Break-even: ___ months\n\n6. DECISION\n   □ GO — Proceed to entity formation\n   □ NO-GO — Concept not viable\n   □ PIVOT — Adjust approach and re-test` },
+  'Competitor Analysis Matrix': { title: 'Competitor Analysis Matrix', format: 'Analysis Template', description: 'Structured competitor analysis for minimum 5 direct competitors.', content: `COMPETITOR ANALYSIS MATRIX\n\n| Criteria | Comp 1 | Comp 2 | Comp 3 | Comp 4 | Comp 5 | US |\n|----------|--------|--------|--------|--------|--------|-----|\n| Price | | | | | | |\n| Services | | | | | | |\n| Strengths | | | | | | |\n| Weaknesses | | | | | | |\n| Market Share | | | | | | |\n| Reviews | | | | | | |\n| USP | | | | | | |\n| Technology | | | | | | |\n\nKey Findings: _______________\nCompetitive Advantage: _______________\nGaps to Exploit: _______________` },
+  'Customer Avatar Worksheet': { title: 'Customer Avatar Worksheet', format: 'Worksheet', description: 'Ideal customer profile worksheet with demographics and psychographics.', content: `CUSTOMER AVATAR WORKSHEET\n\nDEMOGRAPHICS:\n  Age: ___  Gender: ___  Income: $___\n  Location: ___  Education: ___  Occupation: ___\n\nPSYCHOGRAPHICS:\n  Goals: _______________\n  Frustrations: _______________\n  Values: _______________\n  Fears: _______________\n\nCREDIT PROFILE:\n  Current Score Range: ___\n  Primary Issues: ___\n  Financial Goals: ___\n  Timeline: ___\n\nWHERE THEY HANG OUT:\n  Online: ___  Social: ___  Communities: ___\n\nOBJECTIONS:\n  1. _______________\n  2. _______________\n  3. _______________\n\nBUYING TRIGGERS:\n  1. _______________\n  2. _______________` },
+};
+
+// Template API endpoint
+app.get('/api/templates/:name', (c) => {
+  const name = decodeURIComponent(c.req.param('name'));
+  const template = TEMPLATE_CONTENT[name];
+  if (!template) {
+    // Return a generic template response if not found
+    return c.json({ title: name, format: 'Template', description: 'Template for ' + name + '. Full content will be available in the complete template library.', content: name.toUpperCase() + '\\n\\nThis template is part of the RJ Business Solutions Master SOP 2026 system.\\nContact support@rjbusinesssolutions.org for the full template library.\\n\\n[Template content to be customized based on your business needs]', available: false });
+  }
+  return c.json({ ...template, available: true });
+});
+
+// List all available templates
+app.get('/api/templates', (c) => {
+  const templates = Object.keys(TEMPLATE_CONTENT).map(name => ({
+    name,
+    title: TEMPLATE_CONTENT[name].title,
+    format: TEMPLATE_CONTENT[name].format,
+    description: TEMPLATE_CONTENT[name].description,
+  }));
+  return c.json({ templates, total: templates.length });
+});
+
 // ---- SERVE FRONTEND ----
 app.get('/', (c) => {
   return c.html(`<!DOCTYPE html>
@@ -917,7 +970,7 @@ body { font-family: 'Inter', sans-serif; }
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="flex items-center justify-between h-16">
       <div class="flex items-center gap-3">
-        <img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" class="w-10 h-10 rounded-lg shadow">
+        <img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" class="w-10 h-10 rounded-lg shadow cursor-pointer hover:ring-2 hover:ring-blue-400 transition" onclick="resetToHome()" title="Back to Home">
         <div>
           <h1 class="text-lg font-bold text-gray-900">Master SOP <span class="gradient-text">2026</span></h1>
           <p class="text-xs text-gray-500 mono">RJ Business Solutions — Updated April 2026</p>
@@ -984,6 +1037,14 @@ body { font-family: 'Inter', sans-serif; }
   </div>
 </div>
 
+<!-- TEMPLATE PREVIEW MODAL -->
+<div id="templateModal" class="fixed inset-0 z-[60] hidden">
+  <div class="modal-overlay absolute inset-0 bg-black/60" onclick="closeTemplateModal()"></div>
+  <div class="modal-content absolute inset-y-0 right-0 w-full max-w-3xl bg-white shadow-2xl overflow-y-auto">
+    <div id="templateDetail" class="p-6"></div>
+  </div>
+</div>
+
 <script>
 let allSOPs = [];
 let currentPhase = null;
@@ -1035,7 +1096,7 @@ function renderSOPs(sops) {
     const color = phaseColors[s.phase];
     const statusBadge = s.complianceStatus==='critical' ? '<span class="badge-critical text-xs px-2 py-0.5 rounded-full font-medium"><i class="fas fa-exclamation-triangle mr-1"></i>Critical</span>' : '<span class="badge-current text-xs px-2 py-0.5 rounded-full font-medium"><i class="fas fa-check-circle mr-1"></i>Current</span>';
     const changesTag = s.legalChanges2026Count > 0 ? '<span class="bg-amber-50 text-amber-700 border border-amber-200 text-xs px-2 py-0.5 rounded-full font-medium"><i class="fas fa-gavel mr-1"></i>'+s.legalChanges2026Count+' changes</span>' : '';
-    return '<div class="sop-card bg-white rounded-2xl border border-gray-100 p-5 cursor-pointer fade-in" onclick="openSOP(\\''+s.id+'\\')">' +
+    return '<div class="sop-card bg-white rounded-2xl border border-gray-100 p-5 cursor-pointer fade-in" data-sopid="'+s.id+'" onclick="openSOP(this.dataset.sopid)">' +
       '<div class="flex items-start justify-between mb-3">' +
         '<span class="mono text-xs font-bold px-2 py-1 rounded-lg" style="background:'+color+'15;color:'+color+'">'+s.id+'</span>' +
         '<div class="flex gap-1.5">'+statusBadge+changesTag+'</div>' +
@@ -1079,7 +1140,7 @@ async function openSOP(id) {
       '<div class="bg-gray-50 rounded-xl p-4"><h4 class="font-semibold text-gray-900 text-sm mb-2"><i class="fas fa-tools text-gray-500 mr-1"></i> Tools</h4><div class="flex flex-wrap gap-1.5">'+sop.tools.map(t=>'<span class="bg-white border border-gray-200 text-xs px-2 py-1 rounded-lg text-gray-600">'+t+'</span>').join('')+'</div></div>' +
       '<div class="bg-gray-50 rounded-xl p-4"><h4 class="font-semibold text-gray-900 text-sm mb-2"><i class="fas fa-bullseye text-gray-500 mr-1"></i> KPIs</h4><ul class="space-y-1">'+sop.kpis.map(k=>'<li class="text-xs text-gray-600 flex items-start gap-1.5"><i class="fas fa-chart-bar text-green-500 text-xs mt-0.5"></i>'+k+'</li>').join('')+'</ul></div>' +
     '</div>' +
-    '<div class="bg-gray-50 rounded-xl p-4"><h4 class="font-semibold text-gray-900 text-sm mb-2"><i class="fas fa-file-alt text-gray-500 mr-1"></i> Templates</h4><div class="flex flex-wrap gap-1.5">'+sop.templates.map(t=>'<span class="bg-white border border-gray-200 text-xs px-2 py-1 rounded-lg text-gray-600"><i class="fas fa-file-alt mr-1 text-blue-400"></i>'+t+'</span>').join('')+'</div></div>';
+    '<div class="bg-gray-50 rounded-xl p-4"><h4 class="font-semibold text-gray-900 text-sm mb-2"><i class="fas fa-file-alt text-gray-500 mr-1"></i> Templates <span class="text-xs font-normal text-gray-400">(click to preview)</span></h4><div class="flex flex-wrap gap-1.5">'+sop.templates.map(t=>'<button onclick="event.stopPropagation();openTemplateEncoded(this)" data-tpl="'+encodeURIComponent(t)+'" class="bg-white border border-gray-200 text-xs px-3 py-1.5 rounded-lg text-gray-700 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 transition cursor-pointer flex items-center gap-1.5 group"><i class="fas fa-file-alt text-blue-400"></i><span>'+t+'</span><i class="fas fa-external-link-alt text-[10px] text-gray-300 group-hover:text-blue-400"></i></button>').join('')+'</div></div>';
 
   document.getElementById('sopModal').classList.remove('hidden');
 }
@@ -1094,12 +1155,80 @@ async function showLegalChanges() {
     '<h2 class="text-2xl font-bold text-gray-900 mb-2"><i class="fas fa-gavel text-red-500 mr-2"></i>2026 Legal & Regulatory Changes</h2>' +
     '<p class="text-sm text-gray-500 mb-6">'+data.totalChanges+' changes affecting '+data.affectedSOPs+' SOPs — Last updated '+data.lastUpdated+'</p>' +
     '<div class="space-y-4">'+data.changes.map(c=>{
-      return '<div class="bg-white border border-gray-200 rounded-xl p-4"><div class="flex items-center gap-2 mb-3"><span class="mono text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-lg cursor-pointer" onclick="closeLegalModal();openSOP(\\''+c.sopId+'\\')">'+c.sopId+'</span><span class="text-sm font-semibold text-gray-900">'+c.sopTitle+'</span></div><ul class="space-y-2">'+c.changes.map(ch=>'<li class="text-sm text-gray-600 flex items-start gap-2">'+(ch.startsWith('⚠️')?'<span class="text-red-500 flex-shrink-0">⚠️</span><span class="text-red-700">'+ch.replace('⚠️ ','')+'</span>':'<i class="fas fa-chevron-right text-xs text-gray-400 mt-1 flex-shrink-0"></i><span>'+ch+'</span>')+'</li>').join('')+'</ul></div>';
+      return '<div class="bg-white border border-gray-200 rounded-xl p-4"><div class="flex items-center gap-2 mb-3"><span class="mono text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-lg cursor-pointer" data-soplink="'+c.sopId+'" onclick="closeLegalModal();openSOP(this.dataset.soplink)">'+c.sopId+'</span><span class="text-sm font-semibold text-gray-900">'+c.sopTitle+'</span></div><ul class="space-y-2">'+c.changes.map(ch=>'<li class="text-sm text-gray-600 flex items-start gap-2">'+(ch.startsWith('\u26a0\ufe0f')?'<span class="text-red-500 flex-shrink-0">\u26a0\ufe0f</span><span class="text-red-700">'+ch.replace('\u26a0\ufe0f ','')+'</span>':'<i class="fas fa-chevron-right text-xs text-gray-400 mt-1 flex-shrink-0"></i><span>'+ch+'</span>')+'</li>').join('')+'</ul></div>';
     }).join('')+'</div>';
   document.getElementById('legalModal').classList.remove('hidden');
 }
 
 function closeLegalModal() { document.getElementById('legalModal').classList.add('hidden'); }
+function closeTemplateModal() { document.getElementById('templateModal').classList.add('hidden'); }
+
+function resetToHome() {
+  currentPhase = null;
+  document.getElementById('globalSearch').value = '';
+  document.querySelectorAll('.phase-tab').forEach((t,i) => { t.classList.toggle('active', i===0); });
+  renderSOPs(allSOPs);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+let currentTemplateName = '';
+
+function openTemplateEncoded(el) {
+  const name = decodeURIComponent(el.dataset.tpl);
+  openTemplate(name);
+}
+
+async function openTemplate(name) {
+  currentTemplateName = name;
+  const res = await fetch('/api/templates/' + encodeURIComponent(name));
+  const tpl = await res.json();
+  const modal = document.getElementById('templateModal');
+  const detail = document.getElementById('templateDetail');
+  const availBadge = tpl.available
+    ? '<span class="bg-green-50 text-green-700 border border-green-200 text-xs px-2 py-0.5 rounded-full"><i class="fas fa-check-circle mr-1"></i>Full Template</span>'
+    : '<span class="bg-amber-50 text-amber-700 border border-amber-200 text-xs px-2 py-0.5 rounded-full"><i class="fas fa-clock mr-1"></i>Summary</span>';
+  detail.innerHTML =
+    '<div class="flex items-center justify-between mb-6">' +
+      '<button onclick="closeTemplateModal()" class="text-gray-400 hover:text-gray-600 transition"><i class="fas fa-arrow-left text-lg"></i></button>' +
+      '<div class="flex gap-2">' +
+        '<button onclick="copyTemplate()" class="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-xs font-medium hover:bg-blue-100 transition" title="Copy to clipboard"><i class="fas fa-copy mr-1"></i>Copy</button>' +
+        '<button onclick="downloadCurrentTemplate()" class="px-3 py-1.5 bg-green-50 text-green-600 rounded-lg text-xs font-medium hover:bg-green-100 transition" title="Download as text"><i class="fas fa-download mr-1"></i>Download</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mb-6">' +
+      '<div class="flex items-center gap-2 mb-3">'+availBadge+'<span class="bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full"><i class="fas fa-tag mr-1"></i>'+tpl.format+'</span></div>' +
+      '<h2 class="text-xl font-bold text-gray-900 mb-2"><i class="fas fa-file-alt text-blue-500 mr-2"></i>'+tpl.title+'</h2>' +
+      '<p class="text-sm text-gray-500">'+tpl.description+'</p>' +
+    '</div>' +
+    '<div class="bg-gray-900 rounded-xl p-5 overflow-x-auto"><pre id="templateContent" class="text-sm text-green-400 whitespace-pre-wrap font-mono leading-relaxed">'+tpl.content.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</pre></div>' +
+    '<div class="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-3"><p class="text-xs text-blue-600"><i class="fas fa-info-circle mr-1"></i>This template is part of the RJ Business Solutions Master SOP 2026 system. Customize for your specific business needs. Have an attorney review all legal documents before use.</p></div>';
+  modal.classList.remove('hidden');
+}
+
+function copyTemplate() {
+  const content = document.getElementById('templateContent').textContent;
+  navigator.clipboard.writeText(content).then(() => {
+    const btn = event.target.closest('button');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-check mr-1"></i>Copied!';
+    btn.classList.add('bg-green-50','text-green-600');
+    setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('bg-green-50','text-green-600'); }, 2000);
+  });
+}
+
+function downloadCurrentTemplate() {
+  const name = currentTemplateName;
+  const content = document.getElementById('templateContent').textContent;
+  const blob = new Blob([content], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name.replace(/[^a-zA-Z0-9]/g, '_') + '.txt';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 // Search
 document.getElementById('globalSearch').addEventListener('input', function(e){
@@ -1111,7 +1240,7 @@ document.getElementById('globalSearch').addEventListener('input', function(e){
 
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
-  if(e.key==='Escape') { closeModal(); closeLegalModal(); }
+  if(e.key==='Escape') { closeModal(); closeLegalModal(); closeTemplateModal(); }
   if(e.key==='/' && !e.ctrlKey && document.activeElement.tagName!=='INPUT') { e.preventDefault(); document.getElementById('globalSearch').focus(); }
 });
 
