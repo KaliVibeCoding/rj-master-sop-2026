@@ -587,6 +587,790 @@ app.post('/api/ops/execute-sop', async (c) => {
 })
 
 // ============================================================
+// LEAD CAPTURE API — Speed-to-Lead System
+// Maps to: SOP-303 (Lead Gen), SOP-305 (Sales Conversion), SOP-304 (Speed-to-Lead)
+// ============================================================
+
+app.post('/api/leads', async (c) => {
+  const { DB } = c.env
+  try {
+    const body = await c.req.json()
+    const { first_name, last_name, email, phone, credit_score_range, message, source, utm_source, utm_medium, utm_campaign } = body
+    if (!first_name || !email || !phone) return c.json({ error: 'Name, email, and phone required' }, 400)
+    // Check if email already exists
+    const existing = await DB.prepare(`SELECT id FROM clients WHERE email = ?`).bind(email).first()
+    if (existing) return c.json({ success: true, message: 'Thank you! We already have your information and will be in touch shortly.' })
+    // Create as lead client
+    const r = await DB.prepare(`INSERT INTO clients (first_name, last_name, email, phone, status, source, notes, monthly_fee) VALUES (?, ?, ?, ?, 'lead', ?, ?, 0)`).bind(first_name, last_name || '', email, phone, source || `funnel${utm_source ? '_' + utm_source : ''}`, `Score range: ${credit_score_range || 'unknown'}. ${message || ''} UTM: ${utm_source || '-'}/${utm_medium || '-'}/${utm_campaign || '-'}`).run()
+    const leadId = r.meta.last_row_id
+    // Speed-to-lead: create critical priority task (schema allows: critical, high, normal, low)
+    await DB.prepare(`INSERT INTO tasks (title, description, assigned_to, priority, category, status, due_date) VALUES (?, ?, 'AI Agent Beta', 'critical', 'Sales', 'pending', datetime('now', '+5 minutes'))`).bind(`CALL NOW: ${first_name} ${last_name || ''}`, `New lead from funnel! Phone: ${phone} | Email: ${email} | Score: ${credit_score_range || 'unknown'} | Source: ${source || 'funnel'} | Message: ${message || 'none'}`).run()
+    // Notification (schema allows types: alert, reminder, escalation, milestone, compliance, task, workflow, system)
+    await DB.prepare(`INSERT INTO notifications (recipient, type, channel, title, message, severity, related_type, related_id) VALUES ('Rick Jefferson', 'alert', 'in_app', ?, ?, 'critical', 'client', ?)`).bind(`NEW LEAD: ${first_name} ${last_name || ''}`, `Phone: ${phone} — CALL WITHIN 5 MINUTES. Score range: ${credit_score_range || 'unknown'}`, leadId).run()
+    // Audit
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('funnel', 'lead_captured', 'client', ?, ?)`).bind(leadId, `New lead: ${first_name} ${last_name || ''} (${email}) from ${source || 'funnel'}`).run()
+    return c.json({ success: true, message: 'Thank you! We will call you within 5 minutes.' })
+  } catch (err: any) {
+    console.error('Lead capture error:', err.message || err)
+    return c.json({ error: 'Something went wrong. Please try again or call us directly at (505) 555-0100.' }, 500)
+  }
+})
+
+app.get('/api/leads/stats', async (c) => {
+  const { DB } = c.env
+  const total = await DB.prepare("SELECT COUNT(*) as c FROM clients WHERE status='lead'").first()
+  const today = await DB.prepare("SELECT COUNT(*) as c FROM clients WHERE status='lead' AND created_at >= date('now')").first()
+  const converted = await DB.prepare("SELECT COUNT(*) as c FROM clients WHERE status IN ('active','onboarding') AND source LIKE '%funnel%'").first()
+  return c.json({ total_leads: total?.c || 0, today: today?.c || 0, converted: converted?.c || 0 })
+})
+
+// ============================================================
+// SALES FUNNEL LANDING PAGE
+// Maps to: SOP-303 Lead Gen, SOP-305 Sales Conversion, SOP-704 CRO, SOP-012 Sales Consultation
+// ============================================================
+
+app.get('/funnel', (c) => {
+  return c.html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fix Your Credit Score in 90 Days | RJ Business Solutions</title>
+<meta name="description" content="Get 50-100+ point credit score improvement in 90 days. FCRA-compliant disputes, 3 AI agents working your case 24/7. Free consultation — no upfront fees.">
+<meta property="og:title" content="Fix Your Credit Score in 90 Days | RJ Business Solutions">
+<meta property="og:description" content="AI-powered credit repair that actually works. 62 documented procedures. 239 legal templates. Results guaranteed.">
+<meta property="og:image" content="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/x-icon" href="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg">
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Poppins:wght@600;700;800;900&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { heading: ['Poppins', 'sans-serif'], body: ['Inter', 'sans-serif'] },
+      colors: {
+        brand: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 800: '#1e40af', 900: '#1e3a8a' },
+        success: '#10b981', danger: '#ef4444', gold: '#f59e0b',
+      }
+    }
+  }
+}
+</script>
+<style>
+html { scroll-behavior: smooth; }
+body { font-family: 'Inter', sans-serif; }
+.font-heading { font-family: 'Poppins', sans-serif; }
+@keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+@keyframes pulse-glow { 0%,100% { box-shadow: 0 0 20px rgba(59,130,246,0.3); } 50% { box-shadow: 0 0 40px rgba(59,130,246,0.6); } }
+@keyframes count-up { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slide-in-left { from { opacity: 0; transform: translateX(-40px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes slide-in-right { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes fade-in-up { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+.animate-float { animation: float 3s ease-in-out infinite; }
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-count-up { animation: count-up 0.6s ease-out forwards; }
+.animate-slide-left { animation: slide-in-left 0.6s ease-out forwards; }
+.animate-slide-right { animation: slide-in-right 0.6s ease-out forwards; }
+.animate-fade-up { animation: fade-in-up 0.5s ease-out forwards; }
+.cta-btn { background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%); transition: all 0.3s; }
+.cta-btn:hover { transform: translateY(-2px); box-shadow: 0 10px 40px rgba(37,99,235,0.4); }
+.glass { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+.gradient-text { background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.stat-card { transition: all 0.3s; } .stat-card:hover { transform: translateY(-5px); }
+.pain-card { transition: all 0.3s; } .pain-card:hover { border-color: #ef4444; }
+.step-card { transition: all 0.3s; } .step-card:hover { transform: scale(1.03); }
+.pricing-card { transition: all 0.3s; } .pricing-card:hover { transform: translateY(-8px); box-shadow: 0 25px 60px rgba(0,0,0,0.3); }
+.faq-item { cursor: pointer; transition: all 0.2s; }
+.faq-answer { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+.faq-item.active .faq-answer { max-height: 300px; }
+.faq-item.active .faq-icon { transform: rotate(180deg); }
+.faq-icon { transition: transform 0.3s; }
+input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(59,130,246,0.3); border-color: #3b82f6; }
+.toast { position: fixed; top: 20px; right: 20px; z-index: 9999; transform: translateX(120%); transition: transform 0.4s; }
+.toast.show { transform: translateX(0); }
+</style>
+</head>
+<body class="bg-gray-950 text-white">
+
+<!-- TOAST -->
+<div id="toast" class="toast bg-green-600 text-white px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3">
+  <i class="fas fa-check-circle text-2xl"></i>
+  <div>
+    <div class="font-bold">Application Received!</div>
+    <div class="text-sm opacity-90">We'll call you within 5 minutes.</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- STICKY CTA BAR (Mobile) -->
+<!-- ============================================================ -->
+<div class="fixed bottom-0 left-0 right-0 z-50 md:hidden bg-gray-900/95 backdrop-blur-lg border-t border-gray-800 p-3">
+  <a href="#apply" class="cta-btn block text-center text-white font-bold py-3 rounded-xl text-lg">
+    <i class="fas fa-bolt mr-2"></i>Get Your FREE Consultation
+  </a>
+</div>
+
+<!-- ============================================================ -->
+<!-- NAV -->
+<!-- ============================================================ -->
+<nav class="fixed top-0 left-0 right-0 z-40 bg-gray-950/80 backdrop-blur-xl border-b border-gray-800/50">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" class="w-10 h-10 rounded-lg">
+      <span class="font-heading font-bold text-lg hidden sm:block">RJ Business Solutions</span>
+    </div>
+    <div class="hidden md:flex items-center gap-6 text-sm text-gray-400">
+      <a href="#results" class="hover:text-white transition">Results</a>
+      <a href="#how-it-works" class="hover:text-white transition">How It Works</a>
+      <a href="#pricing" class="hover:text-white transition">Pricing</a>
+      <a href="#faq" class="hover:text-white transition">FAQ</a>
+    </div>
+    <a href="#apply" class="cta-btn text-white text-sm font-semibold px-5 py-2.5 rounded-lg">
+      Free Consultation <i class="fas fa-arrow-right ml-1"></i>
+    </a>
+  </div>
+</nav>
+
+<!-- ============================================================ -->
+<!-- HERO -->
+<!-- ============================================================ -->
+<section class="relative min-h-screen flex items-center pt-20 pb-16 overflow-hidden">
+  <!-- BG Effects -->
+  <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-blue-900/20 via-gray-950 to-gray-950"></div>
+  <div class="absolute top-20 left-10 w-72 h-72 bg-blue-600/10 rounded-full blur-[100px]"></div>
+  <div class="absolute bottom-20 right-10 w-96 h-96 bg-purple-600/10 rounded-full blur-[120px]"></div>
+
+  <div class="relative max-w-7xl mx-auto px-4 grid lg:grid-cols-2 gap-12 items-center">
+    <!-- Left -->
+    <div class="animate-slide-left">
+      <div class="inline-flex items-center gap-2 bg-blue-600/10 border border-blue-500/20 rounded-full px-4 py-1.5 text-sm text-blue-400 mb-6">
+        <i class="fas fa-shield-halved"></i> FCRA & CROA Compliant — 100% Legal
+      </div>
+
+      <h1 class="font-heading font-900 text-4xl sm:text-5xl lg:text-6xl leading-tight mb-6">
+        Raise Your Credit Score
+        <span class="gradient-text block">50-100+ Points</span>
+        <span class="text-gray-400 text-3xl sm:text-4xl lg:text-5xl">in 90 Days</span>
+      </h1>
+
+      <p class="text-lg sm:text-xl text-gray-400 mb-8 max-w-xl leading-relaxed">
+        3 AI agents work your case 24/7. 62 documented procedures. 239 legal templates. 
+        Every dispute FCRA-cited, certified mail, fully tracked. 
+        <strong class="text-white">No upfront fees — ever.</strong>
+      </p>
+
+      <!-- Social Proof Bar -->
+      <div class="flex flex-wrap gap-4 sm:gap-6 mb-8">
+        <div class="stat-card glass rounded-xl px-4 py-3 text-center">
+          <div class="text-2xl font-bold text-blue-400">490<i class="fas fa-arrow-right mx-2 text-sm"></i>710</div>
+          <div class="text-xs text-gray-500">Avg Score Jump</div>
+        </div>
+        <div class="stat-card glass rounded-xl px-4 py-3 text-center">
+          <div class="text-2xl font-bold text-green-400">89%</div>
+          <div class="text-xs text-gray-500">Deletion Rate</div>
+        </div>
+        <div class="stat-card glass rounded-xl px-4 py-3 text-center">
+          <div class="text-2xl font-bold text-purple-400">24/7</div>
+          <div class="text-xs text-gray-500">AI Monitoring</div>
+        </div>
+        <div class="stat-card glass rounded-xl px-4 py-3 text-center">
+          <div class="text-2xl font-bold text-gold">$0</div>
+          <div class="text-xs text-gray-500">Upfront Cost</div>
+        </div>
+      </div>
+
+      <div class="flex flex-col sm:flex-row gap-4">
+        <a href="#apply" class="cta-btn animate-pulse-glow text-white font-bold text-lg px-8 py-4 rounded-xl text-center">
+          <i class="fas fa-bolt mr-2"></i>Get Your FREE Consultation
+        </a>
+        <a href="tel:+15055550100" class="border border-gray-700 hover:border-blue-500 text-white font-semibold px-8 py-4 rounded-xl text-center transition">
+          <i class="fas fa-phone mr-2"></i>Call Now
+        </a>
+      </div>
+    </div>
+
+    <!-- Right — Score Animation -->
+    <div class="animate-slide-right hidden lg:block">
+      <div class="relative">
+        <div class="glass rounded-3xl p-8 text-center animate-float">
+          <div class="text-sm text-gray-500 mb-2">Your credit score could be</div>
+          <div class="font-heading font-900 text-8xl gradient-text mb-2" id="scoreCounter">520</div>
+          <div class="flex items-center justify-center gap-2 text-green-400 text-lg font-bold">
+            <i class="fas fa-arrow-up"></i> +190 points possible
+          </div>
+          <div class="mt-6 flex justify-center gap-3">
+            <div class="bg-red-500/20 text-red-400 px-3 py-1 rounded-full text-xs font-semibold">Before: 520</div>
+            <div class="fas fa-arrow-right text-gray-600 mt-1"></div>
+            <div class="bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-semibold">After: 710</div>
+          </div>
+
+          <div class="mt-6 grid grid-cols-3 gap-3 text-center">
+            <div class="bg-gray-800/50 rounded-lg p-3">
+              <i class="fas fa-robot text-blue-400 text-xl mb-1"></i>
+              <div class="text-xs text-gray-500">AI Agent Alpha</div>
+              <div class="text-xs text-green-400">Working...</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-3">
+              <i class="fas fa-robot text-purple-400 text-xl mb-1"></i>
+              <div class="text-xs text-gray-500">AI Agent Beta</div>
+              <div class="text-xs text-green-400">Working...</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-3">
+              <i class="fas fa-robot text-cyan-400 text-xl mb-1"></i>
+              <div class="text-xs text-gray-500">AI Agent Gamma</div>
+              <div class="text-xs text-green-400">Working...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scroll indicator -->
+  <div class="absolute bottom-8 left-1/2 -translate-x-1/2 text-gray-600 animate-bounce">
+    <i class="fas fa-chevron-down text-2xl"></i>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- PAIN POINTS — Problem Agitation -->
+<!-- ============================================================ -->
+<section class="py-20 bg-gray-900/50">
+  <div class="max-w-6xl mx-auto px-4">
+    <div class="text-center mb-14">
+      <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Bad Credit Is <span class="text-red-500">Costing You</span> Every Single Day</h2>
+      <p class="text-gray-400 max-w-2xl mx-auto text-lg">The longer you wait, the more money you lose. Here's what a low credit score is doing to your life right now:</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">🏠</div>
+        <h3 class="font-bold text-xl mb-2">Can't Get a Home</h3>
+        <p class="text-gray-400">Mortgage denied. Or you're paying <span class="text-red-400 font-bold">$300-$500/mo MORE</span> in interest than someone with good credit. That's $108K over 30 years.</p>
+      </div>
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">🚗</div>
+        <h3 class="font-bold text-xl mb-2">Car Loan Robbery</h3>
+        <p class="text-gray-400">18-24% APR instead of 4-6%. You're paying <span class="text-red-400 font-bold">$200+/mo extra</span> because of negative items that might not even be accurate.</p>
+      </div>
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">💳</div>
+        <h3 class="font-bold text-xl mb-2">Credit Card Denial</h3>
+        <p class="text-gray-400">No rewards cards. No cashback. No balance transfer offers. You're stuck with <span class="text-red-400 font-bold">secured cards and high fees</span>.</p>
+      </div>
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">🏢</div>
+        <h3 class="font-bold text-xl mb-2">Apartment Rejection</h3>
+        <p class="text-gray-400">Landlords run credit checks. Low score = <span class="text-red-400 font-bold">denied or double security deposit</span>. That's thousands gone.</p>
+      </div>
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">💼</div>
+        <h3 class="font-bold text-xl mb-2">Jobs Lost</h3>
+        <p class="text-gray-400">Employers check credit for financial roles. Bad credit = <span class="text-red-400 font-bold">dream job gone</span>. It's legal in most states.</p>
+      </div>
+      <div class="pain-card bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-red-500/50">
+        <div class="text-4xl mb-4">😰</div>
+        <h3 class="font-bold text-xl mb-2">Stress & Shame</h3>
+        <p class="text-gray-400">The anxiety of checking your score. The shame of being declined. <span class="text-red-400 font-bold">It doesn't have to be this way.</span></p>
+      </div>
+    </div>
+
+    <div class="text-center mt-10">
+      <a href="#apply" class="cta-btn text-white font-bold text-lg px-10 py-4 rounded-xl inline-block">
+        <i class="fas fa-hand-point-right mr-2"></i>Stop Losing Money — Start Fixing It Now
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- HOW IT WORKS — The System -->
+<!-- ============================================================ -->
+<section id="how-it-works" class="py-20">
+  <div class="max-w-6xl mx-auto px-4">
+    <div class="text-center mb-14">
+      <div class="inline-flex items-center gap-2 bg-blue-600/10 border border-blue-500/20 rounded-full px-4 py-1.5 text-sm text-blue-400 mb-4">
+        <i class="fas fa-cogs"></i> Our Proprietary System
+      </div>
+      <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">How We <span class="gradient-text">Fix Your Credit</span> in 3 Steps</h2>
+      <p class="text-gray-400 max-w-2xl mx-auto text-lg">Not templates. Not generic letters. A documented 62-procedure system with AI agents working 24/7.</p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8">
+      <div class="step-card glass rounded-2xl p-8 text-center relative">
+        <div class="absolute -top-5 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center font-bold text-lg">1</div>
+        <div class="text-5xl mb-6 mt-4"><i class="fas fa-magnifying-glass-chart text-blue-400"></i></div>
+        <h3 class="font-heading font-bold text-xl mb-3">Free Credit Analysis</h3>
+        <p class="text-gray-400 mb-4">We pull your reports from all 3 bureaus and identify every disputable item — errors, outdated info, unverifiable accounts.</p>
+        <div class="text-xs text-blue-400 bg-blue-500/10 rounded-lg px-3 py-2">
+          <i class="fas fa-file-lines mr-1"></i> SOP-101: Credit Report Analysis
+        </div>
+      </div>
+
+      <div class="step-card glass rounded-2xl p-8 text-center relative">
+        <div class="absolute -top-5 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full bg-purple-600 flex items-center justify-center font-bold text-lg">2</div>
+        <div class="text-5xl mb-6 mt-4"><i class="fas fa-robot text-purple-400"></i></div>
+        <h3 class="font-heading font-bold text-xl mb-3">AI-Powered Disputes</h3>
+        <p class="text-gray-400 mb-4">3 AI agents draft FCRA-cited dispute letters, send via certified mail, track 30-day deadlines, and escalate non-responses.</p>
+        <div class="text-xs text-purple-400 bg-purple-500/10 rounded-lg px-3 py-2">
+          <i class="fas fa-gavel mr-1"></i> SOP-105: Round 1 Execution + 9 more dispute SOPs
+        </div>
+      </div>
+
+      <div class="step-card glass rounded-2xl p-8 text-center relative">
+        <div class="absolute -top-5 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full bg-green-600 flex items-center justify-center font-bold text-lg">3</div>
+        <div class="text-5xl mb-6 mt-4"><i class="fas fa-chart-line text-green-400"></i></div>
+        <h3 class="font-heading font-bold text-xl mb-3">Score Goes Up</h3>
+        <p class="text-gray-400 mb-4">Items get deleted or corrected. Score climbs. We monitor, celebrate milestones, and keep pushing until you hit your goal.</p>
+        <div class="text-xs text-green-400 bg-green-500/10 rounded-lg px-3 py-2">
+          <i class="fas fa-trophy mr-1"></i> SOP-402: Score Monitoring + SOP-406: Celebrations
+        </div>
+      </div>
+    </div>
+
+    <!-- System Stats -->
+    <div class="mt-14 glass rounded-2xl p-8 grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
+      <div>
+        <div class="font-heading font-bold text-3xl text-blue-400">62</div>
+        <div class="text-gray-500 text-sm">Documented Procedures</div>
+      </div>
+      <div>
+        <div class="font-heading font-bold text-3xl text-purple-400">239</div>
+        <div class="text-gray-500 text-sm">Legal Templates</div>
+      </div>
+      <div>
+        <div class="font-heading font-bold text-3xl text-green-400">3</div>
+        <div class="text-gray-500 text-sm">AI Agents 24/7</div>
+      </div>
+      <div>
+        <div class="font-heading font-bold text-3xl text-gold">30</div>
+        <div class="text-gray-500 text-sm">2026 Legal Updates Tracked</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- RESULTS / SOCIAL PROOF -->
+<!-- ============================================================ -->
+<section id="results" class="py-20 bg-gray-900/50">
+  <div class="max-w-6xl mx-auto px-4">
+    <div class="text-center mb-14">
+      <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Real People. <span class="text-green-400">Real Results.</span></h2>
+      <p class="text-gray-400 text-lg">Our clients don't just get letters — they get life-changing score improvements.</p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8">
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-green-500/30 transition">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-12 h-12 rounded-full bg-gradient-to-r from-blue-500 to-purple-500 flex items-center justify-center text-xl font-bold">A</div>
+          <div>
+            <div class="font-bold">Angela M.</div>
+            <div class="text-xs text-gray-500">Tijeras, NM</div>
+          </div>
+          <div class="ml-auto text-yellow-400 text-sm"><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i></div>
+        </div>
+        <div class="flex items-center gap-4 mb-4">
+          <div class="text-center"><div class="text-red-400 font-bold text-2xl">490</div><div class="text-xs text-gray-500">Before</div></div>
+          <div class="text-green-400"><i class="fas fa-arrow-right text-2xl"></i></div>
+          <div class="text-center"><div class="text-green-400 font-bold text-2xl">710</div><div class="text-xs text-gray-500">After</div></div>
+          <div class="ml-auto bg-green-500/10 text-green-400 px-3 py-1 rounded-full text-sm font-bold">+220 pts</div>
+        </div>
+        <p class="text-gray-400 text-sm italic">"7 months and 12 deletions later, I qualified for my first home. Rick's team didn't just fix my credit — they changed my life."</p>
+        <div class="mt-3 text-xs text-gray-600">12 items deleted across 3 bureaus • 7 months</div>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-green-500/30 transition">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-12 h-12 rounded-full bg-gradient-to-r from-green-500 to-cyan-500 flex items-center justify-center text-xl font-bold">M</div>
+          <div>
+            <div class="font-bold">Marcus T.</div>
+            <div class="text-xs text-gray-500">Albuquerque, NM</div>
+          </div>
+          <div class="ml-auto text-yellow-400 text-sm"><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i></div>
+        </div>
+        <div class="flex items-center gap-4 mb-4">
+          <div class="text-center"><div class="text-red-400 font-bold text-2xl">520</div><div class="text-xs text-gray-500">Before</div></div>
+          <div class="text-green-400"><i class="fas fa-arrow-right text-2xl"></i></div>
+          <div class="text-center"><div class="text-green-400 font-bold text-2xl">685</div><div class="text-xs text-gray-500">Current</div></div>
+          <div class="ml-auto bg-green-500/10 text-green-400 px-3 py-1 rounded-full text-sm font-bold">+165 pts</div>
+        </div>
+        <p class="text-gray-400 text-sm italic">"Round 1 got 3 deletions. Round 2 in progress. The dashboard shows me everything — I can see AI Agent Alpha working my case in real time."</p>
+        <div class="mt-3 text-xs text-gray-600">3 deletions so far • Round 2 in progress • Target: 700</div>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 hover:border-green-500/30 transition">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-12 h-12 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 flex items-center justify-center text-xl font-bold">S</div>
+          <div>
+            <div class="font-bold">Sarah W.</div>
+            <div class="text-xs text-gray-500">Rio Rancho, NM</div>
+          </div>
+          <div class="ml-auto text-yellow-400 text-sm"><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i></div>
+        </div>
+        <div class="flex items-center gap-4 mb-4">
+          <div class="text-center"><div class="text-red-400 font-bold text-2xl">480</div><div class="text-xs text-gray-500">Before</div></div>
+          <div class="text-green-400"><i class="fas fa-arrow-right text-2xl"></i></div>
+          <div class="text-center"><div class="text-green-400 font-bold text-2xl">640</div><div class="text-xs text-gray-500">Current</div></div>
+          <div class="ml-auto bg-green-500/10 text-green-400 px-3 py-1 rounded-full text-sm font-bold">+160 pts</div>
+        </div>
+        <p class="text-gray-400 text-sm italic">"Medical debt was killing me. They used specific FCRA sections to dispute every item. 5 gone in the first round. I can finally breathe."</p>
+        <div class="mt-3 text-xs text-gray-600">5 medical debts disputed • Focus: medical collections</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- PRICING -->
+<!-- ============================================================ -->
+<section id="pricing" class="py-20">
+  <div class="max-w-5xl mx-auto px-4">
+    <div class="text-center mb-14">
+      <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Simple, <span class="gradient-text">Transparent Pricing</span></h2>
+      <p class="text-gray-400 text-lg">No upfront fees. No hidden charges. You only pay after we work — that's the law (CROA), and we follow it.</p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8">
+      <!-- Starter -->
+      <div class="pricing-card bg-gray-900 border border-gray-800 rounded-2xl p-8">
+        <div class="text-sm text-gray-500 font-semibold uppercase tracking-wider mb-2">Starter</div>
+        <div class="flex items-baseline gap-1 mb-1">
+          <span class="font-heading font-bold text-4xl">$99</span>
+          <span class="text-gray-500">/month</span>
+        </div>
+        <div class="text-xs text-gray-600 mb-6">Billed after service performed</div>
+        <ul class="space-y-3 mb-8 text-sm text-gray-300">
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Credit report analysis (3 bureaus)</li>
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Up to 5 disputes per round</li>
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Certified mail delivery</li>
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Monthly progress report</li>
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Email support</li>
+          <li class="text-gray-600"><i class="fas fa-xmark text-gray-700 mr-2"></i>Direct creditor disputes</li>
+          <li class="text-gray-600"><i class="fas fa-xmark text-gray-700 mr-2"></i>Priority AI agent assignment</li>
+        </ul>
+        <a href="#apply" class="block text-center border border-gray-700 hover:border-blue-500 text-white font-semibold py-3 rounded-xl transition">Get Started</a>
+      </div>
+
+      <!-- Pro (Most Popular) -->
+      <div class="pricing-card bg-gray-900 border-2 border-blue-500 rounded-2xl p-8 relative scale-105">
+        <div class="absolute -top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-xs font-bold px-4 py-1 rounded-full">MOST POPULAR</div>
+        <div class="text-sm text-blue-400 font-semibold uppercase tracking-wider mb-2">Professional</div>
+        <div class="flex items-baseline gap-1 mb-1">
+          <span class="font-heading font-bold text-4xl">$149</span>
+          <span class="text-gray-500">/month</span>
+        </div>
+        <div class="text-xs text-gray-600 mb-6">Billed after service performed</div>
+        <ul class="space-y-3 mb-8 text-sm text-gray-300">
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Everything in Starter</li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i><strong>Unlimited disputes per round</strong></li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i><strong>Direct creditor disputes</strong></li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i><strong>Inquiry removal</strong></li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i><strong>AI Agent Alpha priority</strong></li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i>Bi-weekly progress updates</li>
+          <li><i class="fas fa-check text-blue-400 mr-2"></i>Phone + email support</li>
+        </ul>
+        <a href="#apply" class="cta-btn block text-center text-white font-bold py-3 rounded-xl">Get Started <i class="fas fa-arrow-right ml-1"></i></a>
+      </div>
+
+      <!-- Premium -->
+      <div class="pricing-card bg-gray-900 border border-gray-800 rounded-2xl p-8">
+        <div class="text-sm text-purple-400 font-semibold uppercase tracking-wider mb-2">Premium</div>
+        <div class="flex items-baseline gap-1 mb-1">
+          <span class="font-heading font-bold text-4xl">$199</span>
+          <span class="text-gray-500">/month</span>
+        </div>
+        <div class="text-xs text-gray-600 mb-6">Billed after service performed</div>
+        <ul class="space-y-3 mb-8 text-sm text-gray-300">
+          <li><i class="fas fa-check text-green-400 mr-2"></i>Everything in Professional</li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i><strong>3 AI agents on your case</strong></li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i><strong>Identity theft recovery</strong></li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i><strong>CFPB & FTC escalation</strong></li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i><strong>Goodwill letter campaigns</strong></li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i>Real-time score monitoring</li>
+          <li><i class="fas fa-check text-purple-400 mr-2"></i>Dedicated account manager</li>
+        </ul>
+        <a href="#apply" class="block text-center border border-gray-700 hover:border-purple-500 text-white font-semibold py-3 rounded-xl transition">Get Started</a>
+      </div>
+    </div>
+
+    <div class="text-center mt-8">
+      <div class="inline-flex items-center gap-3 glass rounded-full px-6 py-3 text-sm text-gray-400">
+        <i class="fas fa-shield-halved text-green-400"></i>
+        <span>30-day money-back guarantee</span>
+        <span class="text-gray-700">|</span>
+        <i class="fas fa-ban text-blue-400"></i>
+        <span>Cancel anytime — no contracts</span>
+        <span class="text-gray-700">|</span>
+        <i class="fas fa-gavel text-gold"></i>
+        <span>CROA compliant</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- FAQ -->
+<!-- ============================================================ -->
+<section id="faq" class="py-20 bg-gray-900/50">
+  <div class="max-w-3xl mx-auto px-4">
+    <div class="text-center mb-14">
+      <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Got Questions?</h2>
+      <p class="text-gray-400 text-lg">Straight answers. No BS.</p>
+    </div>
+
+    <div class="space-y-3">
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">Is credit repair legal?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">100% legal. The Fair Credit Reporting Act (FCRA) gives you the RIGHT to dispute any inaccurate, outdated, or unverifiable information on your credit report. Credit bureaus have 30 days to investigate. We're fully FCRA and CROA compliant — it's literally built into our 62 operating procedures.</p></div>
+      </div>
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">How fast will I see results?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">Most clients see their first deletions within 30-45 days (the FCRA investigation window). Significant score improvement (50-100+ points) typically happens within 90 days. Complex cases may take 4-6 months. We track everything — you'll see real-time progress in your dashboard.</p></div>
+      </div>
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">Do I pay anything upfront?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">Absolutely not. Under the Credit Repair Organizations Act (CROA), it's illegal to charge before services are performed. We follow this to the letter. Your first payment is only after we've completed work on your behalf.</p></div>
+      </div>
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">What are "AI Agents"?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">We use 3 specialized AI agents: Alpha handles dispute filing and bureau responses, Beta manages client communication and retention, and Gamma handles compliance and scheduling. They work 24/7 processing your case through our 62 documented procedures — faster, more accurate, and more thorough than manual processing.</p></div>
+      </div>
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">Can I cancel anytime?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">Yes. No long-term contracts. You have a 3-business-day right to cancel per CROA, and you can cancel your monthly service at any time after that. We believe in earning your business every single month.</p></div>
+      </div>
+      <div class="faq-item bg-gray-900 border border-gray-800 rounded-xl p-5" onclick="this.classList.toggle('active')">
+        <div class="flex justify-between items-center">
+          <h3 class="font-semibold">What's different about RJ Business Solutions?</h3>
+          <i class="fas fa-chevron-down faq-icon text-gray-500"></i>
+        </div>
+        <div class="faq-answer"><p class="text-gray-400 text-sm mt-3 leading-relaxed">Most credit repair companies send generic template letters and hope for the best. We run a documented 62-procedure system with 239 legal templates, 3 AI agents, and track 30 legal changes for 2026. Every dispute cites specific FCRA sections. Every letter goes certified mail with tracking. Every case has a strategy, not a template.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- LEAD CAPTURE FORM — The Money Section -->
+<!-- ============================================================ -->
+<section id="apply" class="py-20">
+  <div class="max-w-4xl mx-auto px-4">
+    <div class="glass rounded-3xl p-8 sm:p-12 relative overflow-hidden">
+      <!-- BG glow -->
+      <div class="absolute -top-20 -right-20 w-60 h-60 bg-blue-600/20 rounded-full blur-[80px]"></div>
+      <div class="absolute -bottom-20 -left-20 w-60 h-60 bg-purple-600/20 rounded-full blur-[80px]"></div>
+
+      <div class="relative">
+        <div class="text-center mb-10">
+          <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-3">Get Your <span class="gradient-text">FREE Consultation</span></h2>
+          <p class="text-gray-400 text-lg">Fill this out. We'll call you within 5 minutes. No obligation. No pressure.</p>
+        </div>
+
+        <form id="leadForm" class="grid sm:grid-cols-2 gap-5" onsubmit="return submitLead(event)">
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">First Name *</label>
+            <input type="text" name="first_name" required placeholder="Your first name" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Last Name</label>
+            <input type="text" name="last_name" placeholder="Your last name" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Email *</label>
+            <input type="email" name="email" required placeholder="your@email.com" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Phone *</label>
+            <input type="tel" name="phone" required placeholder="(555) 123-4567" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Credit Score Range</label>
+            <select name="credit_score_range" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white">
+              <option value="">Select range</option>
+              <option value="below-500">Below 500</option>
+              <option value="500-550">500 - 550</option>
+              <option value="550-600">550 - 600</option>
+              <option value="600-650">600 - 650</option>
+              <option value="650-700">650 - 700</option>
+              <option value="above-700">Above 700</option>
+              <option value="not-sure">Not Sure</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Biggest Credit Issue</label>
+            <select name="message" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white">
+              <option value="">Select issue</option>
+              <option value="Collections">Collections / Charge-offs</option>
+              <option value="Late Payments">Late Payments</option>
+              <option value="Medical Debt">Medical Debt</option>
+              <option value="Identity Theft">Identity Theft</option>
+              <option value="Inquiries">Too Many Inquiries</option>
+              <option value="Mixed File">Mixed / Wrong Info on Report</option>
+              <option value="Multiple Issues">Multiple Issues</option>
+              <option value="Not Sure">Not Sure — Need Analysis</option>
+            </select>
+          </div>
+
+          <!-- Hidden UTM fields -->
+          <input type="hidden" name="source" value="funnel">
+          <input type="hidden" name="utm_source" id="utm_source">
+          <input type="hidden" name="utm_medium" id="utm_medium">
+          <input type="hidden" name="utm_campaign" id="utm_campaign">
+
+          <div class="sm:col-span-2">
+            <button type="submit" id="submitBtn" class="cta-btn w-full text-white font-bold text-lg py-4 rounded-xl">
+              <i class="fas fa-bolt mr-2"></i>Get My FREE Credit Analysis
+            </button>
+            <p class="text-xs text-gray-600 text-center mt-3">
+              <i class="fas fa-lock mr-1"></i> Your information is 100% secure. We never share or sell your data. GLBA compliant.
+            </p>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- FINAL CTA -->
+<!-- ============================================================ -->
+<section class="py-16 bg-gradient-to-r from-blue-900/30 via-purple-900/30 to-blue-900/30">
+  <div class="max-w-4xl mx-auto px-4 text-center">
+    <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Every Day You Wait Costs You Money</h2>
+    <p class="text-gray-400 text-lg mb-8 max-w-2xl mx-auto">Higher interest rates. Denied applications. Lost opportunities. The math is simple — fixing your credit now saves you thousands.</p>
+    <a href="#apply" class="cta-btn animate-pulse-glow text-white font-bold text-xl px-12 py-5 rounded-xl inline-block">
+      <i class="fas fa-bolt mr-2"></i>Start My FREE Consultation
+    </a>
+    <div class="mt-4 text-gray-600 text-sm">No credit card required • No upfront payment • 5-minute response</div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- FOOTER -->
+<!-- ============================================================ -->
+<footer class="py-12 border-t border-gray-800/50">
+  <div class="max-w-6xl mx-auto px-4">
+    <div class="grid md:grid-cols-3 gap-8 mb-8">
+      <div>
+        <div class="flex items-center gap-3 mb-4">
+          <img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" class="w-10 h-10 rounded-lg">
+          <span class="font-heading font-bold">RJ Business Solutions</span>
+        </div>
+        <p class="text-gray-500 text-sm leading-relaxed">AI-powered credit repair backed by 62 documented procedures, 239 legal templates, and 30 tracked 2026 legal changes. FCRA & CROA compliant.</p>
+      </div>
+      <div>
+        <h4 class="font-bold mb-4">Contact</h4>
+        <div class="space-y-2 text-sm text-gray-500">
+          <div><i class="fas fa-map-marker-alt text-blue-400 mr-2 w-4"></i>1342 NM 333, Tijeras, NM 87059</div>
+          <div><i class="fas fa-globe text-blue-400 mr-2 w-4"></i><a href="https://rjbusinesssolutions.org" class="hover:text-white transition">rjbusinesssolutions.org</a></div>
+          <div><i class="fas fa-envelope text-blue-400 mr-2 w-4"></i>support@rjbusinesssolutions.org</div>
+        </div>
+      </div>
+      <div>
+        <h4 class="font-bold mb-4">Legal</h4>
+        <div class="space-y-2 text-sm text-gray-500">
+          <div><i class="fas fa-shield-halved text-green-400 mr-2 w-4"></i>FCRA Compliant (SOP-601)</div>
+          <div><i class="fas fa-gavel text-green-400 mr-2 w-4"></i>CROA Compliant (SOP-602)</div>
+          <div><i class="fas fa-lock text-green-400 mr-2 w-4"></i>GLBA Data Privacy (SOP-604)</div>
+          <div><i class="fas fa-file-contract text-green-400 mr-2 w-4"></i>State Licensed (SOP-603)</div>
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-col sm:flex-row justify-between items-center pt-8 border-t border-gray-800/50 text-xs text-gray-600">
+      <div>&copy; 2026 RJ Business Solutions. All rights reserved.</div>
+      <div class="flex gap-4 mt-4 sm:mt-0">
+        <a href="https://twitter.com/ricksolutions1" class="hover:text-white transition"><i class="fab fa-twitter"></i></a>
+        <a href="https://linkedin.com/in/rick-jefferson-314998235" class="hover:text-white transition"><i class="fab fa-linkedin"></i></a>
+        <a href="https://tiktok.com/@rick_jeff_solution" class="hover:text-white transition"><i class="fab fa-tiktok"></i></a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<div class="h-16 md:hidden"></div><!-- Mobile CTA spacer -->
+
+<script>
+// UTM capture
+const urlParams = new URLSearchParams(window.location.search);
+document.getElementById('utm_source').value = urlParams.get('utm_source') || '';
+document.getElementById('utm_medium').value = urlParams.get('utm_medium') || '';
+document.getElementById('utm_campaign').value = urlParams.get('utm_campaign') || '';
+
+// Score counter animation
+let score = 520;
+const target = 710;
+const counter = document.getElementById('scoreCounter');
+if (counter) {
+  const interval = setInterval(() => {
+    score += 2;
+    if (score >= target) { score = target; clearInterval(interval); }
+    counter.textContent = score;
+  }, 30);
+}
+
+// Lead form submission
+async function submitLead(e) {
+  e.preventDefault();
+  const btn = document.getElementById('submitBtn');
+  const form = document.getElementById('leadForm');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Submitting...';
+
+  const data = {};
+  new FormData(form).forEach((v, k) => data[k] = v);
+
+  try {
+    const r = await fetch('/api/leads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    const result = await r.json();
+    if (result.success) {
+      btn.innerHTML = '<i class="fas fa-check mr-2"></i>Application Received!';
+      btn.classList.remove('cta-btn');
+      btn.classList.add('bg-green-600');
+      document.getElementById('toast').classList.add('show');
+      setTimeout(() => document.getElementById('toast').classList.remove('show'), 5000);
+      form.reset();
+      // Track conversion
+      if (typeof gtag !== 'undefined') gtag('event', 'conversion', { send_to: 'lead_captured' });
+      if (typeof fbq !== 'undefined') fbq('track', 'Lead');
+    } else {
+      btn.innerHTML = '<i class="fas fa-exclamation-triangle mr-2"></i>' + (result.error || 'Please try again');
+      btn.disabled = false;
+      setTimeout(() => { btn.innerHTML = '<i class="fas fa-bolt mr-2"></i>Get My FREE Credit Analysis'; btn.classList.add('cta-btn'); }, 3000);
+    }
+  } catch (err) {
+    btn.innerHTML = '<i class="fas fa-exclamation-triangle mr-2"></i>Error — please call us';
+    btn.disabled = false;
+    setTimeout(() => { btn.innerHTML = '<i class="fas fa-bolt mr-2"></i>Get My FREE Credit Analysis'; }, 3000);
+  }
+}
+</script>
+</body>
+</html>`)
+})
+
+// ============================================================
 // FRONTEND — OPERATIONS COMMAND CENTER v2
 // ============================================================
 
