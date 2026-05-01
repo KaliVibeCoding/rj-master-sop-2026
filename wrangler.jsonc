@@ -13,4 +13,10 @@
       "database_id": "62b785bb-c601-4271-b7a3-ad7efc7605ae"
     }
   ]
+  // Secrets (set via `wrangler secret put` or .dev.vars for local):
+  // MFSN_API_URL, MFSN_API_EMAIL, MFSN_API_PASSWORD
+  // STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY
+  // TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
+  // SENDGRID_API_KEY, RESEND_API_KEY
+  // OPENROUTER_API_KEY, GROQ_API_KEY
 }

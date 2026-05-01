@@ -2,7 +2,23 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { TEMPLATE_CONTENT } from './templates'
 
-type Bindings = { DB: D1Database }
+type Bindings = {
+  DB: D1Database
+  // MFSN (MyFreeScoreNow) API
+  MFSN_API_URL: string
+  MFSN_API_EMAIL: string
+  MFSN_API_PASSWORD: string
+  // Twilio SMS/Voice
+  TWILIO_ACCOUNT_SID: string
+  TWILIO_AUTH_TOKEN: string
+  TWILIO_PHONE_NUMBER: string
+  // Email
+  SENDGRID_API_KEY: string
+  RESEND_API_KEY: string
+  // Stripe
+  STRIPE_SECRET_KEY: string
+  STRIPE_PUBLISHABLE_KEY: string
+}
 const app = new Hono<{ Bindings: Bindings }>()
 app.use('/api/*', cors())
 
@@ -2220,6 +2236,377 @@ switchTab = function(tab) { origSwitchTab(tab); if(tab==='kpis' && !chartsInitia
 </script>
 </body>
 </html>`)
+})
+
+// ============================================================
+// MFSN (MyFreeScoreNow) — 3-BUREAU CREDIT REPORT API
+// API Spec: MFSN-REPORTS v1.0.0
+// Base URL: https://api.myfreescorenow.com
+// Auth: POST /api/auth/login → token → POST /api/auth/fetch-3B-json
+// Maps to: SOP-101 (Credit Report Analysis), SOP-402 (Score Monitoring)
+// ============================================================
+
+// MFSN Login — get session token
+app.post('/api/mfsn/login', async (c) => {
+  const { env } = c
+  const apiUrl = env.MFSN_API_URL || 'https://api.myfreescorenow.com'
+  const email = env.MFSN_API_EMAIL
+  const password = env.MFSN_API_PASSWORD
+  if (!email || !password) return c.json({ error: 'MFSN credentials not configured' }, 500)
+  try {
+    const form = new FormData()
+    form.append('email', email)
+    form.append('password', password)
+    const res = await fetch(`${apiUrl}/api/auth/login`, { method: 'POST', body: form })
+    const data = await res.json() as any
+    if (!data.success) return c.json({ error: data.message || 'Login failed' }, 401)
+    return c.json({ success: true, message: 'MFSN authenticated', data: data.data })
+  } catch (err: any) {
+    return c.json({ error: 'MFSN login failed: ' + (err.message || 'Unknown error') }, 500)
+  }
+})
+
+// MFSN Fetch 3-Bureau Credit Report
+app.post('/api/mfsn/fetch-3b', async (c) => {
+  const { DB, env } = c
+  const body = await c.req.json() as any
+  const { client_email, client_token, client_id } = body
+  if (!client_email || !client_token) return c.json({ error: 'client_email and client_token required' }, 400)
+  const apiUrl = env.MFSN_API_URL || 'https://api.myfreescorenow.com'
+  try {
+    // Step 1: Login to get session
+    const loginForm = new FormData()
+    loginForm.append('email', env.MFSN_API_EMAIL)
+    loginForm.append('password', env.MFSN_API_PASSWORD)
+    const loginRes = await fetch(`${apiUrl}/api/auth/login`, { method: 'POST', body: loginForm })
+    const loginData = await loginRes.json() as any
+    if (!loginData.success) return c.json({ error: 'MFSN auth failed: ' + loginData.message }, 401)
+
+    // Step 2: Fetch 3B report
+    const fetchForm = new FormData()
+    fetchForm.append('email', client_email)
+    fetchForm.append('client_token', client_token)
+    const fetchRes = await fetch(`${apiUrl}/api/auth/fetch-3B-json`, { method: 'POST', body: fetchForm })
+    const reportData = await fetchRes.json() as any
+    if (!reportData.success) return c.json({ error: 'Report fetch failed: ' + reportData.message }, 400)
+
+    // Step 3: Parse the report data
+    const providerViews = reportData.data?.providerViews || []
+    let scoreEfx: number | null = null, scoreTu: number | null = null, scoreExp: number | null = null
+    let efxId = '', tuId = '', expId = ''
+    let totalAccounts = 0, totalInquiries = 0, totalPublicRecords = 0, totalCollections = 0
+    let totalOpenAccounts = 0, totalNegativeAccounts = 0, creditHistoryMonths = 0, avgAccountAge = 0
+    let oldestDate = '', oldestName = '', newestDate = '', newestName = ''
+
+    for (const view of providerViews) {
+      const provider = view.provider || view.summary?.provider
+      const summary = view.summary || {}
+      const score = summary.creditScore?.score
+      if (provider === 'EFX') { scoreEfx = score; efxId = summary.id || '' }
+      if (provider === 'TU') { scoreTu = score; tuId = summary.id || '' }
+      if (provider === 'EXP') { scoreExp = score; expId = summary.id || '' }
+      totalAccounts += summary.totalOpenAccounts?.count || 0
+      totalInquiries += summary.totalInquires || 0
+      totalPublicRecords += summary.totalPublicRecords || 0
+      totalCollections += summary.totalCollections || 0
+      totalNegativeAccounts += summary.totalNegativeAccounts || 0
+      if (summary.lengthOfCreditHistoryMonths > creditHistoryMonths) creditHistoryMonths = summary.lengthOfCreditHistoryMonths || 0
+      if (summary.averageAccountAgeMonths > avgAccountAge) avgAccountAge = summary.averageAccountAgeMonths || 0
+      if (summary.oldestAccountOpenDate) { oldestDate = summary.oldestAccountOpenDate; oldestName = summary.oldestAccountName || '' }
+      if (summary.mostRecentAccountOpenDate) { newestDate = summary.mostRecentAccountOpenDate; newestName = summary.mostRecentAccountName || '' }
+    }
+
+    // Step 4: Store in D1 if client_id provided
+    let reportId = null
+    if (client_id && DB) {
+      try {
+        const r = await DB.prepare(`INSERT INTO credit_reports (client_id, mfsn_member_email, report_type, score_efx, score_tu, score_exp, efx_report_id, tu_report_id, exp_report_id, total_accounts, total_open_accounts, total_negative_accounts, total_inquiries, total_public_records, total_collections, credit_history_months, avg_account_age_months, oldest_account_date, oldest_account_name, newest_account_date, newest_account_name, raw_response_json, pulled_by, status) VALUES (?, ?, 'US_3B', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Rick Jefferson', 'active')`)
+          .bind(client_id, client_email, scoreEfx, scoreTu, scoreExp, efxId, tuId, expId, totalAccounts, totalOpenAccounts, totalNegativeAccounts, totalInquiries, totalPublicRecords, totalCollections, creditHistoryMonths, avgAccountAge, oldestDate, oldestName, newestDate, newestName, JSON.stringify(reportData.data))
+          .run()
+        reportId = r.meta.last_row_id
+
+        // Store score history
+        const avgScore = [scoreEfx, scoreTu, scoreExp].filter(s => s !== null)
+        const scoreAvg = avgScore.length > 0 ? Math.round(avgScore.reduce((a, b) => a! + b!, 0)! / avgScore.length) : null
+        await DB.prepare(`INSERT INTO credit_score_history (client_id, credit_report_id, score_efx, score_tu, score_exp, score_avg, source) VALUES (?, ?, ?, ?, ?, ?, 'mfsn')`)
+          .bind(client_id, reportId, scoreEfx, scoreTu, scoreExp, scoreAvg).run()
+
+        // Update client credit scores
+        if (scoreAvg) {
+          await DB.prepare(`UPDATE clients SET credit_score_current = ?, updated_at = datetime('now') WHERE id = ?`).bind(scoreAvg, client_id).run()
+        }
+
+        // Audit log
+        await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'credit_report_pulled', 'credit_report', ?, ?)`)
+          .bind(reportId, `3B report for client ${client_id}: EFX=${scoreEfx} TU=${scoreTu} EXP=${scoreExp}`).run()
+
+        // Parse and store individual accounts
+        for (const view of providerViews) {
+          const accounts = view.accounts || []
+          const provider = view.provider || view.summary?.provider || 'UNKNOWN'
+          for (const acct of accounts) {
+            await DB.prepare(`INSERT INTO credit_report_accounts (credit_report_id, client_id, provider, account_name, account_number, account_status, account_open, loan_type, balance_amount, credit_limit_amount, high_credit_amount, monthly_payment, past_due_amount, charge_off_amount, payment_status, raw_account_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              .bind(reportId, client_id, provider, acct.accountName || '', acct.accountNumber || '', acct.accountStatus || '', acct.accountOpen ? 1 : 0, acct.loanType?.description || '', acct.balanceAmount?.value || 0, acct.creditLimitAmount?.value || 0, acct.highCreditAmount?.value || 0, acct.monthlyPayment?.value || 0, acct.pastDueAmount?.value || 0, acct.chargeOffAmount?.value || 0, acct.paymentStatus || '', JSON.stringify(acct)).run()
+          }
+        }
+      } catch (dbErr: any) {
+        console.error('D1 storage error:', dbErr.message)
+      }
+    }
+
+    return c.json({
+      success: true,
+      report_id: reportId,
+      scores: { efx: scoreEfx, tu: scoreTu, exp: scoreExp },
+      summary: { totalAccounts, totalOpenAccounts, totalNegativeAccounts, totalInquiries, totalPublicRecords, totalCollections, creditHistoryMonths, avgAccountAge, oldestDate, oldestName, newestDate, newestName },
+      providerCount: providerViews.length,
+      stored: !!reportId
+    })
+  } catch (err: any) {
+    return c.json({ error: 'MFSN fetch failed: ' + (err.message || 'Unknown error') }, 500)
+  }
+})
+
+// Get credit reports for a client
+app.get('/api/mfsn/reports/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  const reports = await DB.prepare('SELECT id, pull_date, score_efx, score_tu, score_exp, total_accounts, total_negative_accounts, total_inquiries, status FROM credit_reports WHERE client_id = ? ORDER BY pull_date DESC').bind(clientId).all()
+  return c.json({ reports: reports.results })
+})
+
+// Get score history for a client
+app.get('/api/mfsn/score-history/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  const history = await DB.prepare('SELECT * FROM credit_score_history WHERE client_id = ? ORDER BY recorded_date DESC').bind(clientId).all()
+  return c.json({ history: history.results })
+})
+
+// Get accounts from a specific report
+app.get('/api/mfsn/reports/:reportId/accounts', async (c) => {
+  const { DB } = c.env; const reportId = c.req.param('reportId')
+  const accounts = await DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? ORDER BY provider, account_name').bind(reportId).all()
+  return c.json({ accounts: accounts.results })
+})
+
+// ============================================================
+// TWILIO — SMS / VOICE INTEGRATION
+// Maps to: SOP-304 (Speed-to-Lead), SOP-102 (Client Communication)
+// ============================================================
+
+// Send SMS via Twilio
+app.post('/api/twilio/sms', async (c) => {
+  const { DB, env } = c
+  const { to, message, client_id, template_name, sop_id } = await c.req.json() as any
+  if (!to || !message) return c.json({ error: 'to and message required' }, 400)
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) return c.json({ error: 'Twilio not configured' }, 500)
+  try {
+    const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`
+    const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+    const params = new URLSearchParams()
+    params.append('To', to)
+    params.append('From', env.TWILIO_PHONE_NUMBER)
+    params.append('Body', message)
+    const res = await fetch(twilioUrl, {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    })
+    const data = await res.json() as any
+    if (data.error_code) return c.json({ error: data.message, code: data.error_code }, 400)
+
+    // Log communication
+    if (DB) {
+      await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, body, status, external_id, template_name, sop_id) VALUES (?, 'sms', 'outbound', 'twilio', ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(client_id || null, env.TWILIO_PHONE_NUMBER, to, message, data.status || 'sent', data.sid || null, template_name || null, sop_id || null).run()
+      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'sms_sent', 'communication', 0, ?)`)
+        .bind(`SMS to ${to}: ${message.substring(0, 100)}`).run()
+    }
+    return c.json({ success: true, sid: data.sid, status: data.status })
+  } catch (err: any) {
+    return c.json({ error: 'Twilio SMS failed: ' + (err.message || 'Unknown') }, 500)
+  }
+})
+
+// Make voice call via Twilio
+app.post('/api/twilio/call', async (c) => {
+  const { DB, env } = c
+  const { to, twiml, client_id, sop_id } = await c.req.json() as any
+  if (!to) return c.json({ error: 'to phone number required' }, 400)
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) return c.json({ error: 'Twilio not configured' }, 500)
+  try {
+    const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Calls.json`
+    const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+    const params = new URLSearchParams()
+    params.append('To', to)
+    params.append('From', env.TWILIO_PHONE_NUMBER)
+    params.append('Twiml', twiml || '<Response><Say>Hello, this is RJ Business Solutions calling about your credit repair consultation. Press 1 to connect to an agent.</Say></Response>')
+    const res = await fetch(twilioUrl, {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    })
+    const data = await res.json() as any
+
+    if (DB) {
+      await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, status, external_id, sop_id) VALUES (?, 'voice', 'outbound', 'twilio', ?, ?, ?, ?, ?)`)
+        .bind(client_id || null, env.TWILIO_PHONE_NUMBER, to, data.status || 'queued', data.sid || null, sop_id || null).run()
+    }
+    return c.json({ success: true, sid: data.sid, status: data.status })
+  } catch (err: any) {
+    return c.json({ error: 'Twilio call failed: ' + (err.message || 'Unknown') }, 500)
+  }
+})
+
+// Get communication log
+app.get('/api/communications', async (c) => {
+  const { DB } = c.env; const clientId = c.req.query('client_id'); const channel = c.req.query('channel')
+  let q = 'SELECT cm.*, c.first_name || \' \' || c.last_name as client_name FROM communications cm LEFT JOIN clients c ON cm.client_id = c.id'
+  const params: string[] = []; const clauses: string[] = []
+  if (clientId) { clauses.push('cm.client_id = ?'); params.push(clientId) }
+  if (channel) { clauses.push('cm.channel = ?'); params.push(channel) }
+  if (clauses.length) q += ' WHERE ' + clauses.join(' AND ')
+  q += ' ORDER BY cm.created_at DESC LIMIT 100'
+  const r = await DB.prepare(q).bind(...params).all()
+  return c.json({ communications: r.results, total: r.results.length })
+})
+
+// ============================================================
+// EMAIL SERVICE — SendGrid + Resend
+// Maps to: SOP-102 (Client Communication), SOP-401 (Monthly Check-In)
+// ============================================================
+
+// Send email via SendGrid
+app.post('/api/email/sendgrid', async (c) => {
+  const { DB, env } = c
+  const { to, subject, html_body, text_body, client_id, template_name, sop_id } = await c.req.json() as any
+  if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
+  if (!env.SENDGRID_API_KEY) return c.json({ error: 'SendGrid not configured' }, 500)
+  try {
+    const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: 'support@rjbusinesssolutions.org', name: 'RJ Business Solutions' },
+        subject,
+        content: [
+          ...(text_body ? [{ type: 'text/plain', value: text_body }] : []),
+          ...(html_body ? [{ type: 'text/html', value: html_body }] : [{ type: 'text/plain', value: subject }])
+        ]
+      })
+    })
+
+    if (DB) {
+      await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, body, status, template_name, sop_id) VALUES (?, 'email', 'outbound', 'sendgrid', 'support@rjbusinesssolutions.org', ?, ?, ?, ?, ?, ?)`)
+        .bind(client_id || null, to, subject, html_body || text_body || '', res.ok ? 'sent' : 'failed', template_name || null, sop_id || null).run()
+      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'email_sent', 'communication', 0, ?)`)
+        .bind(`Email to ${to}: ${subject}`).run()
+    }
+    return c.json({ success: res.ok, status: res.status })
+  } catch (err: any) {
+    return c.json({ error: 'SendGrid failed: ' + (err.message || 'Unknown') }, 500)
+  }
+})
+
+// Send email via Resend
+app.post('/api/email/resend', async (c) => {
+  const { DB, env } = c
+  const { to, subject, html_body, text_body, client_id, template_name, sop_id } = await c.req.json() as any
+  if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
+  if (!env.RESEND_API_KEY) return c.json({ error: 'Resend not configured' }, 500)
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'RJ Business Solutions <support@rjbusinesssolutions.org>',
+        to: [to],
+        subject,
+        html: html_body || undefined,
+        text: text_body || subject
+      })
+    })
+    const data = await res.json() as any
+
+    if (DB) {
+      await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, body, status, external_id, template_name, sop_id) VALUES (?, 'email', 'outbound', 'resend', 'support@rjbusinesssolutions.org', ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(client_id || null, to, subject, html_body || text_body || '', res.ok ? 'sent' : 'failed', data.id || null, template_name || null, sop_id || null).run()
+    }
+    return c.json({ success: res.ok, id: data.id })
+  } catch (err: any) {
+    return c.json({ error: 'Resend failed: ' + (err.message || 'Unknown') }, 500)
+  }
+})
+
+// Speed-to-Lead: Auto-notify on new lead (SMS + Email combo)
+app.post('/api/speed-to-lead', async (c) => {
+  const { DB, env } = c
+  const { client_id, first_name, phone, email } = await c.req.json() as any
+  const results: any[] = []
+
+  // Send SMS via Twilio
+  if (phone && env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) {
+    try {
+      const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+      const params = new URLSearchParams()
+      params.append('To', phone)
+      params.append('From', env.TWILIO_PHONE_NUMBER)
+      params.append('Body', `Hi ${first_name || 'there'}! This is RJ Business Solutions. We received your credit repair inquiry and a specialist will call you within 5 minutes. Questions? Reply to this text or call (866) 752-4618.`)
+      const smsRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+        method: 'POST', headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.toString()
+      })
+      const smsData = await smsRes.json() as any
+      results.push({ channel: 'sms', success: !smsData.error_code, sid: smsData.sid })
+      if (DB) {
+        await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, body, status, external_id, sop_id) VALUES (?, 'sms', 'outbound', 'twilio', ?, ?, ?, 'sent', ?, 'SOP-304')`)
+          .bind(client_id || null, env.TWILIO_PHONE_NUMBER, phone, `Speed-to-lead SMS to ${first_name}`, smsData.sid || null).run()
+      }
+    } catch (err: any) { results.push({ channel: 'sms', success: false, error: err.message }) }
+  }
+
+  // Send welcome email via Resend (or SendGrid as fallback)
+  if (email) {
+    const emailHtml = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" style="width:80px;margin-bottom:20px"><h2 style="color:#1e3a8a">Welcome, ${first_name || 'Friend'}!</h2><p>Thank you for reaching out to <strong>RJ Business Solutions</strong>. A credit repair specialist will contact you within <strong>5 minutes</strong>.</p><p>In the meantime, here's what to expect:</p><ul><li>Free credit report analysis across all 3 bureaus</li><li>Personalized dispute strategy</li><li>FCRA-compliant dispute filing</li><li>AI-powered monitoring with 3 dedicated agents</li></ul><p><strong>No upfront fees — we only bill after services are performed.</strong></p><hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0"><p style="font-size:12px;color:#9ca3af">RJ Business Solutions | 1342 NM 333, Tijeras, NM 87059<br><a href="https://rjbusinesssolutions.org">rjbusinesssolutions.org</a> | (866) 752-4618</p></div>`
+    try {
+      const provider = env.RESEND_API_KEY ? 'resend' : 'sendgrid'
+      let emailSuccess = false
+      if (env.RESEND_API_KEY) {
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: 'RJ Business Solutions <support@rjbusinesssolutions.org>', to: [email], subject: `${first_name || 'Welcome'} — Your Credit Repair Journey Starts Now`, html: emailHtml })
+        })
+        emailSuccess = res.ok
+      } else if (env.SENDGRID_API_KEY) {
+        const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST', headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ personalizations: [{ to: [{ email }] }], from: { email: 'support@rjbusinesssolutions.org', name: 'RJ Business Solutions' }, subject: `${first_name || 'Welcome'} — Your Credit Repair Journey Starts Now`, content: [{ type: 'text/html', value: emailHtml }] })
+        })
+        emailSuccess = res.ok
+      }
+      results.push({ channel: 'email', success: emailSuccess, provider })
+      if (DB) {
+        await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, status, sop_id) VALUES (?, 'email', 'outbound', ?, 'support@rjbusinesssolutions.org', ?, 'Welcome — Credit Repair Journey', ?, 'SOP-304')`)
+          .bind(client_id || null, provider, email, emailSuccess ? 'sent' : 'failed').run()
+      }
+    } catch (err: any) { results.push({ channel: 'email', success: false, error: err.message }) }
+  }
+
+  return c.json({ success: true, results, message: `Speed-to-lead notifications sent: ${results.filter(r => r.success).length}/${results.length}` })
+})
+
+// ============================================================
+// INTEGRATION STATUS — Health check for all services
+// ============================================================
+app.get('/api/integrations/status', async (c) => {
+  const { env } = c
+  return c.json({
+    mfsn: { configured: !!(env.MFSN_API_EMAIL && env.MFSN_API_PASSWORD), url: env.MFSN_API_URL || 'https://api.myfreescorenow.com' },
+    twilio: { configured: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), phone: env.TWILIO_PHONE_NUMBER || 'not set' },
+    sendgrid: { configured: !!env.SENDGRID_API_KEY },
+    resend: { configured: !!env.RESEND_API_KEY },
+    stripe: { configured: !!env.STRIPE_SECRET_KEY },
+    d1: { configured: true, binding: 'DB' }
+  })
 })
 
 export default app
