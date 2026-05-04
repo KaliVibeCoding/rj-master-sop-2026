@@ -3041,4 +3041,705 @@ app.get('/api/cloudflare/twilio', async (c) => {
   })
 })
 
+// ============================================================
+// STRIPE BILLING — Subscription management for all tiers
+// Plans: basic $99, standard $179, premium $299, autopilot $499
+// ============================================================
+
+const STRIPE_PLANS = {
+  basic:     { name: 'Basic Credit Repair',    price: 9900,  interval: 'month', features: ['1 bureau','1 dispute round/mo','SMS updates','Client portal'] },
+  standard:  { name: 'Standard Credit Repair', price: 17900, interval: 'month', features: ['3 bureaus','Unlimited disputes','Priority SMS','Progress reports','Document storage'] },
+  premium:   { name: 'Premium Credit Repair',  price: 29900, interval: 'month', features: ['3 bureaus','Unlimited disputes','AI-generated letters','Monthly progress call','All templates','Compliance tracking'] },
+  autopilot: { name: 'AI Autopilot',           price: 49900, interval: 'month', features: ['Full AI automation','Auto-pull reports','AI dispute letters','Auto-follow-ups','Real-time score tracking','Dedicated AI agent','Priority support'] }
+}
+
+app.get('/api/stripe/plans', (c) => {
+  return c.json({ plans: STRIPE_PLANS, currency: 'usd', note: 'Prices in cents. All plans include CROA-compliant operations, D1 data storage, and SOP-guided workflows.' })
+})
+
+app.post('/api/stripe/create-customer', async (c) => {
+  const { env, DB } = c
+  if (!env.STRIPE_SECRET_KEY) return c.json({ error: 'Stripe not configured' }, 500)
+  const { client_id, email, name } = await c.req.json() as any
+  if (!email) return c.json({ error: 'email required' }, 400)
+  try {
+    const res = await fetch('https://api.stripe.com/v1/customers', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ email, name: name || '', 'metadata[client_id]': String(client_id || ''), 'metadata[source]': 'rj_ops_engine' }).toString()
+    })
+    const customer = await res.json() as any
+    if (customer.error) return c.json({ error: customer.error.message }, 400)
+    if (DB && client_id) {
+      await DB.prepare(`INSERT OR REPLACE INTO client_subscriptions (client_id, stripe_customer_id, plan_name, plan_price, status) VALUES (?, ?, 'basic', 9900, 'trialing') ON CONFLICT(stripe_subscription_id) DO NOTHING`).bind(client_id, customer.id).run().catch(() => {})
+    }
+    return c.json({ success: true, customer_id: customer.id, email: customer.email })
+  } catch (err: any) { return c.json({ error: 'Stripe error: ' + err.message }, 500) }
+})
+
+app.post('/api/stripe/create-subscription', async (c) => {
+  const { env, DB } = c
+  if (!env.STRIPE_SECRET_KEY) return c.json({ error: 'Stripe not configured' }, 500)
+  const { client_id, customer_id, plan, price_id, trial_days } = await c.req.json() as any
+  if (!customer_id || !plan) return c.json({ error: 'customer_id and plan required' }, 400)
+  const planData = STRIPE_PLANS[plan as keyof typeof STRIPE_PLANS]
+  if (!planData) return c.json({ error: 'Invalid plan. Choose: basic, standard, premium, autopilot' }, 400)
+  try {
+    const params: Record<string, string> = {
+      customer: customer_id,
+      'items[0][price]': price_id || '',
+      'metadata[plan_name]': plan,
+      'metadata[client_id]': String(client_id || '')
+    }
+    if (trial_days) params['trial_period_days'] = String(trial_days)
+    if (!price_id) {
+      params['items[0][price_data][currency]'] = 'usd'
+      params['items[0][price_data][product_data][name]'] = planData.name
+      params['items[0][price_data][unit_amount]'] = String(planData.price)
+      params['items[0][price_data][recurring][interval]'] = 'month'
+      delete params['items[0][price]']
+    }
+    const res = await fetch('https://api.stripe.com/v1/subscriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(params).toString()
+    })
+    const sub = await res.json() as any
+    if (sub.error) return c.json({ error: sub.error.message }, 400)
+    if (DB && client_id) {
+      await DB.prepare(`INSERT OR REPLACE INTO client_subscriptions (client_id, stripe_customer_id, stripe_subscription_id, plan_name, plan_price, status, current_period_start, current_period_end) VALUES (?, ?, ?, ?, ?, ?, datetime(?,'unixepoch'), datetime(?,'unixepoch'))`)
+        .bind(client_id, customer_id, sub.id, plan, planData.price, sub.status, sub.current_period_start, sub.current_period_end).run()
+      await DB.prepare(`UPDATE clients SET monthly_fee = ? WHERE id = ?`).bind(Math.round(planData.price / 100), client_id).run()
+      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('stripe', 'subscription_created', 'client', ?, ?)`).bind(client_id, `${plan} subscription created: ${sub.id}`).run()
+    }
+    return c.json({ success: true, subscription_id: sub.id, plan, status: sub.status, amount: planData.price, trial_end: sub.trial_end })
+  } catch (err: any) { return c.json({ error: 'Stripe error: ' + err.message }, 500) }
+})
+
+app.post('/api/stripe/cancel-subscription', async (c) => {
+  const { env, DB } = c
+  if (!env.STRIPE_SECRET_KEY) return c.json({ error: 'Stripe not configured' }, 500)
+  const { subscription_id, client_id, immediately } = await c.req.json() as any
+  if (!subscription_id) return c.json({ error: 'subscription_id required' }, 400)
+  try {
+    const url = `https://api.stripe.com/v1/subscriptions/${subscription_id}`
+    const res = await fetch(immediately ? url : url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: immediately ? '' : new URLSearchParams({ cancel_at_period_end: 'true' }).toString()
+    })
+    const sub = await res.json() as any
+    if (sub.error) return c.json({ error: sub.error.message }, 400)
+    if (DB && client_id) {
+      await DB.prepare(`UPDATE client_subscriptions SET status = ?, cancel_at_period_end = ?, canceled_at = datetime('now') WHERE stripe_subscription_id = ?`).bind(sub.status, sub.cancel_at_period_end ? 1 : 0, subscription_id).run()
+      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'subscription_canceled', 'client', ?, ?)`).bind(client_id || 0, `Subscription ${subscription_id} canceled`).run()
+    }
+    return c.json({ success: true, status: sub.status, cancel_at_period_end: sub.cancel_at_period_end })
+  } catch (err: any) { return c.json({ error: 'Stripe error: ' + err.message }, 500) }
+})
+
+app.get('/api/stripe/subscription/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const sub = await DB.prepare(`SELECT cs.*, c.first_name, c.last_name, c.email FROM client_subscriptions cs LEFT JOIN clients c ON c.id = cs.client_id WHERE cs.client_id = ? ORDER BY cs.created_at DESC LIMIT 1`).bind(clientId).first()
+  return c.json({ subscription: sub || null, plans: STRIPE_PLANS })
+})
+
+app.post('/api/stripe/webhook', async (c) => {
+  const { env, DB } = c
+  const rawBody = await c.req.text()
+  const sig = c.req.header('stripe-signature')
+  let event: any
+  try { event = JSON.parse(rawBody) } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  if (DB) {
+    const exists = await DB.prepare(`SELECT id FROM stripe_events WHERE event_id = ?`).bind(event.id).first()
+    if (exists) return c.json({ received: true, duplicate: true })
+    await DB.prepare(`INSERT INTO stripe_events (event_id, event_type, raw_json) VALUES (?, ?, ?)`).bind(event.id, event.type, rawBody).run()
+  }
+  const obj = event.data?.object
+  try {
+    if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.created') {
+      if (DB) {
+        await DB.prepare(`UPDATE client_subscriptions SET status = ?, current_period_start = datetime(?,'unixepoch'), current_period_end = datetime(?,'unixepoch'), updated_at = datetime('now') WHERE stripe_subscription_id = ?`).bind(obj.status, obj.current_period_start, obj.current_period_end, obj.id).run()
+      }
+    }
+    if (event.type === 'customer.subscription.deleted') {
+      if (DB) await DB.prepare(`UPDATE client_subscriptions SET status = 'canceled', updated_at = datetime('now') WHERE stripe_subscription_id = ?`).bind(obj.id).run()
+    }
+    if (event.type === 'invoice.payment_failed') {
+      const clientId = obj.metadata?.client_id
+      if (DB && clientId) {
+        await DB.prepare(`UPDATE client_subscriptions SET status = 'past_due' WHERE stripe_customer_id = ?`).bind(obj.customer).run()
+        const client = await DB.prepare(`SELECT first_name, phone FROM clients WHERE id = ?`).bind(clientId).first() as any
+        if (client?.phone && env.TWILIO_ACCOUNT_SID) {
+          const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+          await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, { method: 'POST', headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ To: client.phone, From: env.TWILIO_PHONE_NUMBER, Body: `Hi ${client.first_name}, your RJ Business Solutions payment failed. Please update your payment method to continue your credit repair service. Reply STOP to opt out.` }).toString() })
+        }
+      }
+    }
+    if (event.type === 'invoice.payment_succeeded') {
+      if (DB) {
+        await DB.prepare(`UPDATE client_subscriptions SET status = 'active' WHERE stripe_customer_id = ?`).bind(obj.customer).run()
+        await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('stripe', 'payment_succeeded', 'subscription', 0, ?)`).bind(`Invoice paid: ${obj.id} — $${(obj.amount_paid / 100).toFixed(2)}`).run()
+      }
+    }
+    if (DB) await DB.prepare(`UPDATE stripe_events SET processed = 1 WHERE event_id = ?`).bind(event.id).run()
+    return c.json({ received: true, event_type: event.type })
+  } catch (err: any) {
+    if (DB) await DB.prepare(`UPDATE stripe_events SET error = ? WHERE event_id = ?`).bind(err.message, event.id).run()
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+app.post('/api/stripe/billing-portal', async (c) => {
+  const { env } = c
+  if (!env.STRIPE_SECRET_KEY) return c.json({ error: 'Stripe not configured' }, 500)
+  const { customer_id, return_url } = await c.req.json() as any
+  if (!customer_id) return c.json({ error: 'customer_id required' }, 400)
+  try {
+    const res = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ customer: customer_id, return_url: return_url || 'https://rjbusinesssolutions.org' }).toString()
+    })
+    const session = await res.json() as any
+    if (session.error) return c.json({ error: session.error.message }, 400)
+    return c.json({ url: session.url })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.get('/api/stripe/revenue', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const subs = await DB.prepare(`SELECT plan_name, status, COUNT(*) as count, SUM(plan_price) as mrr_cents FROM client_subscriptions WHERE status = 'active' GROUP BY plan_name`).all()
+    const total = await DB.prepare(`SELECT SUM(plan_price) as total_mrr, COUNT(*) as active_subs FROM client_subscriptions WHERE status = 'active'`).first() as any
+    const arr = total?.total_mrr ? total.total_mrr * 12 : 0
+    return c.json({ mrr_cents: total?.total_mrr || 0, mrr_dollars: Math.round((total?.total_mrr || 0) / 100), arr_dollars: Math.round(arr / 100), active_subscriptions: total?.active_subs || 0, by_plan: subs.results })
+  } catch { return c.json({ mrr_cents: 0, mrr_dollars: 0, arr_dollars: 0, active_subscriptions: 0, by_plan: [], note: 'Run migration 0003 to enable subscription tracking' }) }
+})
+
+// ============================================================
+// AI AUTOPILOT ENGINE — Dispute letters, analysis, SOP execution
+// Primary: OpenRouter (routes to best model)
+// Fallback: Groq (fastest), then OpenAI
+// ============================================================
+
+async function callAI(env: Bindings, systemPrompt: string, userPrompt: string, model = 'openai/gpt-4o-mini'): Promise<{ text: string; tokens_in: number; tokens_out: number; cost_cents: number }> {
+  if (env.OPENROUTER_API_KEY) {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://rjbusinesssolutions.org', 'X-Title': 'RJ Business Solutions AI Autopilot' },
+      body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], max_tokens: 4096, temperature: 0.3 })
+    })
+    const data = await res.json() as any
+    if (data.choices?.[0]?.message?.content) {
+      const ti = data.usage?.prompt_tokens || 0, to = data.usage?.completion_tokens || 0
+      return { text: data.choices[0].message.content, tokens_in: ti, tokens_out: to, cost_cents: Math.ceil((ti * 0.00015 + to * 0.0006) * 100) }
+    }
+  }
+  if (env.GROQ_API_KEY) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], max_tokens: 4096 })
+    })
+    const data = await res.json() as any
+    if (data.choices?.[0]?.message?.content) {
+      const ti = data.usage?.prompt_tokens || 0, to = data.usage?.completion_tokens || 0
+      return { text: data.choices[0].message.content, tokens_in: ti, tokens_out: to, cost_cents: 0 }
+    }
+  }
+  if (env.OPENAI_API_KEY) {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], max_tokens: 4096 })
+    })
+    const data = await res.json() as any
+    if (data.choices?.[0]?.message?.content) {
+      const ti = data.usage?.prompt_tokens || 0, to = data.usage?.completion_tokens || 0
+      return { text: data.choices[0].message.content, tokens_in: ti, tokens_out: to, cost_cents: Math.ceil((ti * 0.00015 + to * 0.0006) * 100) }
+    }
+  }
+  throw new Error('No AI model configured. Set OPENROUTER_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.')
+}
+
+app.get('/api/ai/models', (c) => {
+  const { env } = c
+  return c.json({
+    routing: 'OpenRouter → Groq → OpenAI (automatic fallback)',
+    configured: { openrouter: !!env.OPENROUTER_API_KEY, groq: !!env.GROQ_API_KEY, openai: !!env.OPENAI_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY },
+    recommended_models: {
+      dispute_letters: 'openai/gpt-4o — best legal writing, FCRA compliance awareness',
+      report_analysis: 'anthropic/claude-3-5-sonnet — best structured data analysis',
+      fast_drafts: 'meta-llama/llama-3.1-8b-instruct — fastest, free via Groq',
+      lead_scoring: 'openai/gpt-4o-mini — cost-effective classification'
+    },
+    available_via_openrouter: ['openai/gpt-4o', 'openai/gpt-4o-mini', 'anthropic/claude-3-5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct', 'meta-llama/llama-3.1-8b-instruct', 'mistralai/mistral-large', 'deepseek/deepseek-chat']
+  })
+})
+
+app.post('/api/ai/generate-dispute-letter', async (c) => {
+  const { env, DB } = c
+  const body = await c.req.json() as any
+  const { client_id, bureau, account_name, account_number, reason, law_basis, client_name, dispute_id, model } = body
+  if (!bureau || !account_name || !reason) return c.json({ error: 'bureau, account_name, and reason required' }, 400)
+  const systemPrompt = `You are a senior credit repair specialist and legal writer for RJ Business Solutions. You generate FCRA-compliant dispute letters. Follow these rules:
+1. Always cite specific FCRA sections (15 U.S.C. § 1681 et seq.)
+2. Demand verification per Section 611 (15 U.S.C. § 1681i)
+3. Reference the consumer's rights under Section 609 if requesting original documents
+4. Never make false statements — only dispute legitimately questionable items
+5. Include proper demand language: "investigate and delete or correct"
+6. Format professionally with proper letterhead placeholder, date, bureau address
+7. Include certified mail tracking placeholder
+8. Add CROA compliance footer: "This communication is from a credit repair organization."
+9. Request response within 30 days per FCRA
+10. Be firm but legally precise — no aggressive language`
+  const userPrompt = `Generate a complete, ready-to-send FCRA dispute letter for:
+Client: ${client_name || 'Client Name'}
+Bureau: ${bureau.toUpperCase()} (${bureau === 'equifax' ? 'P.O. Box 740256, Atlanta, GA 30374' : bureau === 'transunion' ? 'P.O. Box 2000, Chester, PA 19016' : 'P.O. Box 4500, Allen, TX 75013'})
+Account: ${account_name}${account_number ? ` (Account #: ${account_number})` : ''}
+Dispute Reason: ${reason}
+Legal Basis: ${law_basis || 'FCRA Section 611 — right to dispute inaccurate information'}
+Include: full letter body, signature block placeholder, enclosures list (ID copy, statement), and certified mail reference.`
+  try {
+    const ai = await callAI(env, systemPrompt, userPrompt, model || 'openai/gpt-4o-mini')
+    let jobId = null
+    if (DB) {
+      const job = await DB.prepare(`INSERT INTO ai_jobs (client_id, job_type, sop_id, dispute_id, status, model_used, system_prompt, user_prompt, ai_response, tokens_input, tokens_output, cost_cents, completed_at) VALUES (?, 'dispute_letter', 'SOP-105', ?, 'completed', ?, ?, ?, ?, ?, ?, ?, datetime('now'))`)
+        .bind(client_id || null, dispute_id || null, model || 'openai/gpt-4o-mini', systemPrompt, userPrompt, ai.text, ai.tokens_in, ai.tokens_out, ai.cost_cents).run()
+      jobId = job.meta.last_row_id
+      await DB.prepare(`INSERT INTO compliance_audits (client_id, action_type, law, section_reference, compliant, risk_level, notes) VALUES (?, 'dispute_letter_generated', 'FCRA', '15 U.S.C. § 1681i', 1, 'low', ?)`)
+        .bind(client_id || null, `AI dispute letter generated for ${bureau} — ${account_name}`).run()
+    }
+    return c.json({ success: true, job_id: jobId, letter: ai.text, bureau, account_name, model_used: model || 'openai/gpt-4o-mini', tokens: { input: ai.tokens_in, output: ai.tokens_out }, cost_cents: ai.cost_cents, croa_compliant: true })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.post('/api/ai/analyze-credit-report', async (c) => {
+  const { env, DB } = c
+  const body = await c.req.json() as any
+  const { client_id, report_id, scores, accounts, inquiries, model } = body
+  if (!scores && !accounts) return c.json({ error: 'scores or accounts required' }, 400)
+  const systemPrompt = `You are a certified credit analyst and dispute strategist for RJ Business Solutions. Analyze credit report data and provide:
+1. Score analysis and improvement roadmap
+2. Prioritized dispute targets (highest ROI first)
+3. Recommended dispute strategies per account
+4. FCRA violations to flag
+5. Timeline to score improvement goals
+6. Specific SOP steps to execute
+Be specific, data-driven, and action-oriented. Output structured JSON.`
+  const userPrompt = `Analyze this credit report data and return JSON with dispute_plan array:
+Scores: EFX=${scores?.efx || 'N/A'} TU=${scores?.tu || 'N/A'} EXP=${scores?.exp || 'N/A'}
+Accounts: ${JSON.stringify(accounts?.slice(0, 20) || [])}
+Inquiries: ${JSON.stringify(inquiries?.slice(0, 10) || [])}
+Return JSON: { score_analysis, dispute_targets: [{account, bureau, reason, law_basis, priority, estimated_score_impact}], fcra_violations, timeline_months, recommended_sops }`
+  try {
+    const ai = await callAI(env, systemPrompt, userPrompt, model || 'openai/gpt-4o-mini')
+    let analysis: any = { raw: ai.text }
+    try { const jsonMatch = ai.text.match(/\{[\s\S]*\}/); if (jsonMatch) analysis = JSON.parse(jsonMatch[0]) } catch {}
+    if (DB && client_id) {
+      await DB.prepare(`INSERT INTO ai_jobs (client_id, job_type, sop_id, status, model_used, user_prompt, ai_response, tokens_input, tokens_output, cost_cents, completed_at) VALUES (?, 'report_analysis', 'SOP-101', 'completed', ?, ?, ?, ?, ?, ?, datetime('now'))`)
+        .bind(client_id, model || 'openai/gpt-4o-mini', userPrompt, ai.text, ai.tokens_in, ai.tokens_out, ai.cost_cents).run()
+    }
+    return c.json({ success: true, analysis, model_used: model || 'openai/gpt-4o-mini', tokens: { input: ai.tokens_in, output: ai.tokens_out }, cost_cents: ai.cost_cents })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.post('/api/ai/run-autopilot', async (c) => {
+  const { env, DB } = c
+  const body = await c.req.json() as any
+  const { client_id, actor } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const results: any[] = []
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(client_id).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  try {
+    // Step 1: Lead scoring
+    const systemP = `You are an AI agent for RJ Business Solutions. You run SOPs automatically. Be concise and action-oriented.`
+    const scorePrompt = `Score this credit repair client and return JSON { grade, score_0_100, predicted_ltv_usd, recommended_plan, priority_actions: [], likelihood_to_graduate_pct }:
+Client: ${client.first_name} ${client.last_name}, Status: ${client.status}, Credit Score: ${client.credit_score_current || 'unknown'}, Goal: ${client.credit_score_goal || 'unknown'}, Monthly Fee: $${client.monthly_fee || 0}, Source: ${client.source || 'unknown'}`
+    const scoreAI = await callAI(env, systemP, scorePrompt, 'openai/gpt-4o-mini')
+    let scoring: any = {}
+    try { const m = scoreAI.text.match(/\{[\s\S]*\}/); if (m) scoring = JSON.parse(m[0]) } catch {}
+    await DB.prepare(`INSERT INTO ai_jobs (client_id, job_type, status, model_used, user_prompt, ai_response, tokens_input, tokens_output, cost_cents, completed_at) VALUES (?, 'lead_scoring', 'completed', 'openai/gpt-4o-mini', ?, ?, ?, ?, ?, datetime('now'))`)
+      .bind(client_id, scorePrompt, scoreAI.text, scoreAI.tokens_in, scoreAI.tokens_out, scoreAI.cost_cents).run()
+    if (scoring.score_0_100) {
+      await DB.prepare(`INSERT INTO lead_scores (client_id, score, grade, factors, predicted_ltv, predicted_plan, likelihood_to_close_pct, scored_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'ai')`)
+        .bind(client_id, scoring.score_0_100, scoring.grade || 'C', JSON.stringify(scoring.priority_actions || []), scoring.predicted_ltv_usd || 0, scoring.recommended_plan || 'standard', scoring.likelihood_to_graduate_pct || 50).run()
+    }
+    results.push({ step: 'lead_scoring', status: 'completed', grade: scoring.grade, score: scoring.score_0_100 })
+
+    // Step 2: Check open disputes needing follow-up
+    const overdueDisputes = await DB.prepare(`SELECT * FROM disputes WHERE client_id = ? AND status IN ('sent','investigating') AND sent_date < datetime('now', '-35 days')`).bind(client_id).all()
+    if (overdueDisputes.results.length > 0) {
+      await DB.prepare(`INSERT INTO notifications (recipient, channel, title, message, severity, type) VALUES ('Rick Jefferson', 'dashboard', ?, ?, 'warning', 'action_required')`)
+        .bind(`Overdue Bureau Responses — ${client.first_name} ${client.last_name}`, `${overdueDisputes.results.length} disputes sent 35+ days ago with no response logged. Take next action per SOP-107.`).run()
+      results.push({ step: 'overdue_disputes', status: 'flagged', count: overdueDisputes.results.length, action: 'notifications_created', sop: 'SOP-107' })
+    }
+
+    // Step 3: SOP execution — create follow-up tasks
+    const taskPrompt = `Based on client status "${client.status}" and credit score ${client.credit_score_current || 'unknown'}, list the 3 most important next tasks. Return JSON array: [{title, description, priority, sop_id, due_days_from_now}]`
+    const taskAI = await callAI(env, systemP, taskPrompt, 'openai/gpt-4o-mini')
+    let tasks: any[] = []
+    try { const m = taskAI.text.match(/\[[\s\S]*\]/); if (m) tasks = JSON.parse(m[0]) } catch {}
+    for (const t of tasks.slice(0, 3)) {
+      const dueDate = t.due_days_from_now ? new Date(Date.now() + t.due_days_from_now * 86400000).toISOString().split('T')[0] : null
+      await DB.prepare(`INSERT INTO tasks (client_id, title, description, priority, category, assigned_to, sop_id, due_date) VALUES (?, ?, ?, ?, 'autopilot', 'AI Agent Alpha', ?, ?)`)
+        .bind(client_id, t.title || 'AI Autopilot Task', t.description || '', t.priority || 'normal', t.sop_id || null, dueDate).run()
+    }
+    results.push({ step: 'task_creation', status: 'completed', tasks_created: tasks.length })
+
+    // Step 4: Audit log
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?, 'autopilot_run', 'client', ?, ?)`).bind(actor || 'AI Autopilot', client_id, `Autopilot completed: scoring=${scoring.grade}, overdue=${overdueDisputes.results.length}, tasks=${tasks.length}`).run()
+    return c.json({ success: true, client_id, client_name: `${client.first_name} ${client.last_name}`, steps_completed: results.length, results })
+  } catch (err: any) { return c.json({ error: 'Autopilot error: ' + err.message, partial_results: results }, 500) }
+})
+
+app.post('/api/ai/draft-email', async (c) => {
+  const { env, DB } = c
+  const { client_id, template_type, context, model } = await c.req.json() as any
+  const templates: Record<string, { subject: string; purpose: string }> = {
+    welcome: { subject: 'Welcome to RJ Business Solutions — Your Credit Journey Starts Now', purpose: 'Warm welcome, outline what to expect, set timeline expectations, CROA disclosure' },
+    dispute_filed: { subject: 'Your Dispute Letters Have Been Sent — Here\'s What Happens Next', purpose: 'Confirm disputes sent, explain 30-day bureau timeline, set expectations, reassure client' },
+    progress_update: { subject: 'Your Monthly Credit Progress Report', purpose: 'Share score improvements, deletions, next steps, upsell opportunity if appropriate' },
+    bureau_response: { subject: 'Bureau Response Received — Action Required', purpose: 'Explain bureau response (verified/deleted/updated), next steps, escalation if needed' },
+    graduation: { subject: '🎉 Congratulations — You\'ve Graduated from Credit Repair!', purpose: 'Celebrate success, share final scores, referral ask, testimonial request' },
+    payment_failed: { subject: 'Action Required: Payment Issue with Your Account', purpose: 'Professional payment failed notice, update payment link, service continuity note' }
+  }
+  const tpl = templates[template_type] || { subject: 'Message from RJ Business Solutions', purpose: context || 'General communication' }
+  const systemPrompt = `You are the voice of RJ Business Solutions, a premium credit repair company. Write professional, warm, CROA-compliant client emails. Always include the CROA required disclosure at the bottom: "RJ Business Solutions is a credit repair organization as defined by the Credit Repair Organizations Act. You have the right to cancel this agreement within 3 business days." Keep emails under 400 words. Never promise specific score increases.`
+  const userPrompt = `Write a complete email for:
+Subject: ${tpl.subject}
+Purpose: ${tpl.purpose}
+Context: ${context || 'Standard communication'}
+Include: greeting, body paragraphs, clear CTA, signature from Rick Jefferson, CROA disclosure footer`
+  try {
+    const ai = await callAI(env, systemPrompt, userPrompt, model || 'openai/gpt-4o-mini')
+    if (DB && client_id) {
+      await DB.prepare(`INSERT INTO ai_jobs (client_id, job_type, status, model_used, user_prompt, ai_response, tokens_input, tokens_output, cost_cents, completed_at) VALUES (?, 'email_draft', 'completed', ?, ?, ?, ?, ?, ?, datetime('now'))`)
+        .bind(client_id, model || 'openai/gpt-4o-mini', userPrompt, ai.text, ai.tokens_in, ai.tokens_out, ai.cost_cents).run()
+    }
+    return c.json({ success: true, subject: tpl.subject, email: ai.text, model_used: model || 'openai/gpt-4o-mini', cost_cents: ai.cost_cents })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.post('/api/ai/score-lead', async (c) => {
+  const { env, DB } = c
+  const { client_id, overrides } = await c.req.json() as any
+  if (!client_id || !DB) return c.json({ error: 'client_id and DB required' }, 400)
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(client_id).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const systemPrompt = `You are a credit repair business analyst. Score leads based on potential LTV, likelihood to close, and service fit. Return only valid JSON.`
+  const userPrompt = `Score this lead for a credit repair business. Return JSON: { score: 0-100, grade: "A/B/C/D/F", predicted_ltv_usd: number, recommended_plan: "basic|standard|premium|autopilot", likelihood_to_close_pct: number, priority_actions: string[], notes: string }
+Client data: ${JSON.stringify({ status: client.status, credit_score_current: client.credit_score_current, credit_score_goal: client.credit_score_goal, monthly_fee: client.monthly_fee, source: client.source, created_at: client.created_at, ...overrides })}`
+  try {
+    const ai = await callAI(env, systemPrompt, userPrompt, 'openai/gpt-4o-mini')
+    let scoring: any = {}
+    try { const m = ai.text.match(/\{[\s\S]*\}/); if (m) scoring = JSON.parse(m[0]) } catch { scoring = { score: 50, grade: 'C', notes: ai.text } }
+    await DB.prepare(`INSERT INTO lead_scores (client_id, score, grade, factors, predicted_ltv, predicted_plan, likelihood_to_close_pct) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .bind(client_id, scoring.score || 50, scoring.grade || 'C', JSON.stringify(scoring.priority_actions || []), scoring.predicted_ltv_usd || 0, scoring.recommended_plan || 'standard', scoring.likelihood_to_close_pct || 50).run()
+    return c.json({ success: true, ...scoring })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.get('/api/ai/jobs/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const jobs = await DB.prepare(`SELECT id, job_type, status, model_used, cost_cents, tokens_input, tokens_output, created_at, completed_at, error FROM ai_jobs WHERE client_id = ? ORDER BY created_at DESC LIMIT 50`).bind(clientId).all()
+  const stats = await DB.prepare(`SELECT job_type, COUNT(*) as count, SUM(cost_cents) as total_cost, SUM(tokens_input + tokens_output) as total_tokens FROM ai_jobs WHERE client_id = ? GROUP BY job_type`).bind(clientId).all()
+  return c.json({ jobs: jobs.results, stats: stats.results })
+})
+
+// ============================================================
+// MULTI-TENANT / WHITE-LABEL SAAS
+// ============================================================
+
+app.get('/api/tenants', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const tenants = await DB.prepare(`SELECT id, name, slug, owner_email, plan, plan_price, subscription_status, max_clients, is_active, created_at FROM tenants ORDER BY created_at DESC`).all()
+  const stats = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) as active, SUM(CASE WHEN subscription_status='active' THEN plan_price ELSE 0 END) as mrr FROM tenants`).first() as any
+  return c.json({ tenants: tenants.results, stats: { total: stats?.total || 0, active: stats?.active || 0, mrr_cents: stats?.mrr || 0 } })
+})
+
+app.post('/api/tenants', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, slug, owner_name, owner_email, plan, custom_domain, brand_color, logo_url, company_address, company_phone } = await c.req.json() as any
+  if (!name || !owner_email) return c.json({ error: 'name and owner_email required' }, 400)
+  const safeSlug = (slug || name.toLowerCase().replace(/[^a-z0-9]/g, '-')).substring(0, 50)
+  const planPrices: Record<string, number> = { starter: 49700, professional: 99700, enterprise: 297000 }
+  const trialEnd = new Date(Date.now() + 14 * 86400000).toISOString()
+  try {
+    const result = await DB.prepare(`INSERT INTO tenants (name, slug, owner_name, owner_email, plan, plan_price, custom_domain, brand_color, logo_url, company_address, company_phone, trial_ends_at, subscription_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trialing')`)
+      .bind(name, safeSlug, owner_name || null, owner_email, plan || 'starter', planPrices[plan || 'starter'], custom_domain || null, brand_color || '#2563eb', logo_url || null, company_address || null, company_phone || null, trialEnd).run()
+    const tenantId = result.meta.last_row_id
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'tenant_created', 'tenant', ?, ?)`)
+      .bind(tenantId, `New white-label tenant: ${name} (${owner_email}) — Plan: ${plan || 'starter'}`).run()
+    return c.json({ success: true, tenant_id: tenantId, slug: safeSlug, plan: plan || 'starter', trial_ends: trialEnd, dashboard_url: `https://${safeSlug}.rjbusinesssolutions.org` }, 201)
+  } catch (err: any) {
+    if (err.message?.includes('UNIQUE')) return c.json({ error: 'Slug already taken. Choose a different slug.' }, 409)
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+app.get('/api/tenants/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const tenant = await DB.prepare(`SELECT * FROM tenants WHERE id = ? OR slug = ?`).bind(id, id).first()
+  if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
+  return c.json({ tenant })
+})
+
+app.put('/api/tenants/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const updates = await c.req.json() as any
+  const allowed = ['name', 'brand_color', 'logo_url', 'custom_domain', 'company_address', 'company_phone', 'max_clients', 'max_agents', 'features', 'is_active']
+  const fields = Object.entries(updates).filter(([k]) => allowed.includes(k))
+  if (!fields.length) return c.json({ error: 'No valid fields to update' }, 400)
+  const setClause = fields.map(([k]) => `${k} = ?`).join(', ')
+  const values = [...fields.map(([, v]) => v), id]
+  await DB.prepare(`UPDATE tenants SET ${setClause}, updated_at = datetime('now') WHERE id = ?`).bind(...values).run()
+  return c.json({ success: true, updated_fields: fields.map(([k]) => k) })
+})
+
+app.get('/api/tenants/:id/stats', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const tenant = await DB.prepare(`SELECT id, name, plan, max_clients FROM tenants WHERE id = ? OR slug = ?`).bind(id, id).first() as any
+  if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
+  const [clients, subs, aiJobs] = await Promise.all([
+    DB.prepare(`SELECT COUNT(*) as count, SUM(monthly_fee) as mrr FROM clients WHERE tenant_id = ? OR 1=1 LIMIT 1`).bind(tenant.id).first(),
+    DB.prepare(`SELECT COUNT(*) as count, SUM(plan_price) as mrr FROM client_subscriptions WHERE tenant_id = ? AND status = 'active'`).bind(tenant.id).first(),
+    DB.prepare(`SELECT COUNT(*) as count, SUM(cost_cents) as spend FROM ai_jobs WHERE tenant_id = ?`).bind(tenant.id).first()
+  ])
+  return c.json({ tenant: { id: tenant.id, name: tenant.name, plan: tenant.plan }, stats: { clients: (clients as any)?.count || 0, max_clients: tenant.max_clients, active_subscriptions: (subs as any)?.count || 0, mrr_cents: (subs as any)?.mrr || 0, ai_jobs_run: (aiJobs as any)?.count || 0, ai_spend_cents: (aiJobs as any)?.spend || 0 } })
+})
+
+// ============================================================
+// COURSE / CERTIFICATION ENGINE — SOP-based training
+// ============================================================
+
+const COURSE_MODULES_STATIC = [
+  { id: 'C001', sop_id: 'SOP-001', title: 'CROA Compliance Fundamentals', description: 'Master the Credit Repair Organizations Act — what you can and cannot do', phase: 1, duration_minutes: 45, content_type: 'text', passing_score: 90 },
+  { id: 'C002', sop_id: 'SOP-101', title: 'Reading a 3-Bureau Credit Report', description: 'How to pull, read, and analyze EFX/TU/EXP reports using MFSN', phase: 1, duration_minutes: 60, content_type: 'worksheet', passing_score: 80 },
+  { id: 'C003', sop_id: 'SOP-105', title: 'Round 1 Dispute Strategy', description: 'Building your first dispute campaign — accounts to target, letters to send', phase: 2, duration_minutes: 90, content_type: 'worksheet', passing_score: 80 },
+  { id: 'C004', sop_id: 'SOP-304', title: 'Speed-to-Lead Sales System', description: 'Contact new leads within 5 minutes — scripts, objections, closing', phase: 4, duration_minutes: 60, content_type: 'text', passing_score: 75 },
+  { id: 'C005', sop_id: 'SOP-205', title: 'CROA-Compliant Billing Practices', description: 'How to charge clients legally — what CROA says about payment timing', phase: 2, duration_minutes: 30, content_type: 'text', passing_score: 90 },
+  { id: 'C006', sop_id: 'SOP-402', title: 'Score Monitoring & Progress Reporting', description: 'Monthly client reviews, score tracking, upsell triggers', phase: 4, duration_minutes: 45, content_type: 'text', passing_score: 75 },
+  { id: 'C007', sop_id: 'SOP-107', title: 'Bureau Response Management', description: 'What to do when bureaus respond — deleted, verified, updated', phase: 2, duration_minutes: 60, content_type: 'text', passing_score: 80 },
+  { id: 'C008', sop_id: 'SOP-506', title: 'Building Your AI Agent Team', description: 'How to use AI agents to automate your credit repair business', phase: 5, duration_minutes: 90, content_type: 'text', passing_score: 75 },
+  { id: 'C009', sop_id: 'SOP-601', title: 'Scaling to 7 Figures', description: 'White-labeling, affiliate programs, enterprise clients', phase: 6, duration_minutes: 120, content_type: 'text', passing_score: 75 },
+  { id: 'CERT', sop_id: null, title: 'Certified Credit Repair Specialist — Final Exam', description: 'Complete certification exam covering all phases. Score 85%+ to receive certificate.', phase: 7, duration_minutes: 60, content_type: 'certification', passing_score: 85 }
+]
+
+app.get('/api/course/modules', async (c) => {
+  const { DB } = c.env
+  let dbModules: any[] = []
+  if (DB) {
+    try {
+      const rows = await DB.prepare(`SELECT * FROM course_modules WHERE is_published = 1 ORDER BY sort_order, phase`).all()
+      dbModules = rows.results
+    } catch { dbModules = [] }
+  }
+  return c.json({ modules: dbModules.length > 0 ? dbModules : COURSE_MODULES_STATIC, total: dbModules.length > 0 ? dbModules.length : COURSE_MODULES_STATIC.length, price: { individual: 99700, full_bundle: 299700, certification_only: 49700 }, certification: { name: 'Certified Credit Repair Specialist (CCRS)', issuer: 'RJ Business Solutions', validity_years: 2, cpe_credits: 12 } })
+})
+
+app.post('/api/course/enroll', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, module_id } = await c.req.json() as any
+  if (!client_id || !module_id) return c.json({ error: 'client_id and module_id required' }, 400)
+  const existing = await DB.prepare(`SELECT id FROM course_enrollments WHERE client_id = ? AND module_id = ?`).bind(client_id, module_id).first()
+  if (existing) return c.json({ error: 'Already enrolled in this module' }, 409)
+  const result = await DB.prepare(`INSERT INTO course_enrollments (client_id, module_id, status) VALUES (?, ?, 'enrolled')`).bind(client_id, module_id).run()
+  return c.json({ success: true, enrollment_id: result.meta.last_row_id }, 201)
+})
+
+app.get('/api/course/progress/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const enrollments = await DB.prepare(`SELECT ce.*, cm.title, cm.duration_minutes, cm.phase FROM course_enrollments ce LEFT JOIN course_modules cm ON cm.id = ce.module_id WHERE ce.client_id = ? ORDER BY ce.enrolled_at DESC`).bind(clientId).all()
+  const stats = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed, SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as in_progress FROM course_enrollments WHERE client_id = ?`).bind(clientId).first() as any
+  const pct = stats?.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0
+  return c.json({ enrollments: enrollments.results, progress_pct: pct, total_enrolled: stats?.total || 0, completed: stats?.completed || 0, certified: pct === 100 })
+})
+
+app.put('/api/course/complete/:enrollmentId', async (c) => {
+  const { DB } = c.env; const enrollmentId = c.req.param('enrollmentId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { score } = await c.req.json() as any
+  const enrollment = await DB.prepare(`SELECT ce.*, cm.passing_score, cm.content_type, c.first_name, c.last_name FROM course_enrollments ce LEFT JOIN course_modules cm ON cm.id = ce.module_id LEFT JOIN clients c ON c.id = ce.client_id WHERE ce.id = ?`).bind(enrollmentId).first() as any
+  if (!enrollment) return c.json({ error: 'Enrollment not found' }, 404)
+  const passed = !score || score >= (enrollment.passing_score || 80)
+  const certId = passed && enrollment.content_type === 'certification' ? `CCRS-${enrollment.client_id}-${Date.now()}` : null
+  await DB.prepare(`UPDATE course_enrollments SET status = ?, score = ?, progress_pct = 100, completed_at = datetime('now'), certificate_id = ?, attempts = attempts + 1 WHERE id = ?`)
+    .bind(passed ? 'completed' : 'failed', score || null, certId, enrollmentId).run()
+  if (passed && enrollment.content_type === 'certification') {
+    await DB.prepare(`INSERT INTO notifications (recipient, channel, title, message, severity, type) VALUES (?, 'dashboard', 'Certification Earned!', ?, 'success', 'achievement')`)
+      .bind(`${enrollment.first_name} ${enrollment.last_name}`, `${enrollment.first_name} ${enrollment.last_name} has earned the Certified Credit Repair Specialist (CCRS) certification! Certificate ID: ${certId}`).run()
+  }
+  return c.json({ success: true, passed, score, certificate_id: certId, status: passed ? 'completed' : 'failed' })
+})
+
+app.get('/api/course/certificate/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const cert = await DB.prepare(`SELECT ce.certificate_id, ce.completed_at, ce.score, c.first_name, c.last_name FROM course_enrollments ce LEFT JOIN clients c ON c.id = ce.client_id WHERE ce.client_id = ? AND ce.certificate_id IS NOT NULL ORDER BY ce.completed_at DESC LIMIT 1`).bind(clientId).first() as any
+  if (!cert) return c.json({ error: 'No certificate found. Complete all modules and final exam.' }, 404)
+  return c.json({ certificate: { id: cert.certificate_id, holder: `${cert.first_name} ${cert.last_name}`, certification: 'Certified Credit Repair Specialist (CCRS)', issuer: 'RJ Business Solutions', issued_date: cert.completed_at?.split('T')[0], score: cert.score, valid_until: new Date(new Date(cert.completed_at).getTime() + 2 * 365 * 86400000).toISOString().split('T')[0], verify_url: `https://rjbusinesssolutions.org/verify/${cert.certificate_id}` } })
+})
+
+// ============================================================
+// CROA / FCRA COMPLIANCE ENGINE
+// ============================================================
+
+const CROA_RULES = [
+  { id: 'CROA-1', section: '§ 404', title: 'No Advance Fees', description: 'Cannot charge or receive money before services are fully performed. Payment only after dispute services rendered.', risk: 'critical', action: 'Ensure Stripe subscription charges AFTER dispute round completion, or use monthly installment post-service' },
+  { id: 'CROA-2', section: '§ 405', title: 'Written Contract Required', description: 'Must provide written agreement before any services. Client must sign.', risk: 'critical', action: 'Always execute Client Agreement (Template: CLIENT_AGREEMENT) before any work begins' },
+  { id: 'CROA-3', section: '§ 405(b)', title: '3-Day Cancellation Right', description: 'Client has right to cancel within 3 business days without penalty.', risk: 'high', action: 'Include cancellation notice in contract. Log contract date. Never start work in first 3 days.' },
+  { id: 'CROA-4', section: '§ 404(b)(2)', title: 'No False Representations', description: 'Cannot make untrue statements about services or guarantee specific score improvements.', risk: 'critical', action: 'Never promise specific point increases. Say "we pursue all legally disputable items" not "we will raise your score 100 points"' },
+  { id: 'CROA-5', section: '§ 404(a)(3)', title: 'No Advising False Identity', description: 'Cannot advise clients to assume a new identity or use EIN as alternative SSN ("CPN schemes").', risk: 'critical', action: 'Zero tolerance. Fire any agent who suggests CPNs. Log refusal in compliance audit.' },
+  { id: 'CROA-6', section: '§ 406', title: 'Disclosure Statement Required', description: 'Must provide "Consumer Credit File Rights Under State and Federal Law" disclosure.', risk: 'high', action: 'Include FCRA rights disclosure in onboarding packet. Use template FCRA_DISCLOSURE.' },
+  { id: 'CROA-7', section: '§ 404(b)(1)', title: 'No Altering Credit History', description: 'Cannot advise creating new credit identities or disputing accurate negative information.', risk: 'critical', action: 'Only dispute inaccurate, unverifiable, or legally questionable items. Document the basis for each dispute.' },
+  { id: 'FCRA-1', section: '15 U.S.C. § 1681i', title: 'Right to Dispute Inaccuracies', description: 'Consumers have the right to dispute inaccurate or incomplete information.', risk: 'info', action: 'Basis for all dispute letters. Always cite this section.' },
+  { id: 'FCRA-2', section: '15 U.S.C. § 1681g', title: 'Right to Access Report', description: 'Consumers have right to see their credit report and dispute information.', risk: 'info', action: 'Pull reports via MFSN with client written authorization (FCRA_AUTH_FORM).' },
+  { id: 'FCRA-3', section: '15 U.S.C. § 1681s-2', title: '7-Year Rule on Negative Items', description: 'Most negative items must be removed after 7 years. Bankruptcies: 10 years.', risk: 'medium', action: 'Check account open dates. Items past 7 years are automatic deletion targets regardless of accuracy.' },
+  { id: 'FCRA-4', section: '15 U.S.C. § 1681c-2', title: 'Identity Theft Victims', description: 'Victims of identity theft can block reporting of fraudulent information.', risk: 'medium', action: 'If client is ID theft victim, use FCRA § 605B block — faster than standard dispute process.' },
+  { id: 'FDCPA-1', section: '15 U.S.C. § 1692g', title: 'Debt Validation', description: 'Consumers can demand debt collectors validate the debt within 30 days.', risk: 'medium', action: 'For collection accounts, send debt validation letter FIRST before dispute letter.' }
+]
+
+app.get('/api/compliance/croa-rules', (c) => {
+  return c.json({ total: CROA_RULES.length, rules: CROA_RULES, laws: ['Credit Repair Organizations Act (CROA) — 15 U.S.C. §§ 1679-1679j', 'Fair Credit Reporting Act (FCRA) — 15 U.S.C. §§ 1681-1681x', 'Fair Debt Collection Practices Act (FDCPA) — 15 U.S.C. §§ 1692-1692p', 'Equal Credit Opportunity Act (ECOA) — 15 U.S.C. §§ 1691-1691f', 'Truth in Lending Act (TILA) — 15 U.S.C. §§ 1601-1667f'], disclaimer: 'This is operational guidance only, not legal advice. Consult a licensed attorney for specific legal questions.' })
+})
+
+app.post('/api/compliance/croa-check', async (c) => {
+  const { DB } = c.env
+  const { action, client_id, details } = await c.req.json() as any
+  if (!action) return c.json({ error: 'action required' }, 400)
+  const risks: any[] = []
+  const actionLower = action.toLowerCase()
+  if (actionLower.includes('charge') || actionLower.includes('payment') || actionLower.includes('fee')) {
+    risks.push({ rule: 'CROA-1', severity: 'critical', message: 'Verify payment is AFTER services rendered — CROA prohibits advance fees.' })
+  }
+  if (actionLower.includes('guarantee') || actionLower.includes('promise') || actionLower.includes('definitely') || actionLower.includes('100 point')) {
+    risks.push({ rule: 'CROA-4', severity: 'critical', message: 'Cannot make guarantees or promise specific score improvements.' })
+  }
+  if (actionLower.includes('cpn') || actionLower.includes('ein') || actionLower.includes('new identity') || actionLower.includes('new credit')) {
+    risks.push({ rule: 'CROA-5', severity: 'critical', message: 'CPN/EIN schemes are ILLEGAL. This is federal fraud.' })
+  }
+  if (actionLower.includes('dispute') && !actionLower.includes('inaccurate') && !actionLower.includes('unverifiable') && !actionLower.includes('verify')) {
+    risks.push({ rule: 'CROA-7', severity: 'high', message: 'Only dispute inaccurate or unverifiable items. Document legal basis for each dispute.' })
+  }
+  const compliant = risks.filter(r => r.severity === 'critical').length === 0
+  const riskLevel = risks.some(r => r.severity === 'critical') ? 'critical' : risks.some(r => r.severity === 'high') ? 'high' : risks.length > 0 ? 'medium' : 'low'
+  if (DB && client_id) {
+    await DB.prepare(`INSERT INTO compliance_audits (client_id, action_type, law, compliant, risk_level, notes) VALUES (?, ?, 'CROA', ?, ?, ?)`)
+      .bind(client_id, action.substring(0, 200), compliant ? 1 : 0, riskLevel, risks.map(r => r.message).join('; ')).run()
+  }
+  return c.json({ compliant, risk_level: riskLevel, risks, cleared_rules: CROA_RULES.filter(r => !risks.find(x => x.rule === r.id)).map(r => r.id), recommendation: compliant ? 'Action appears compliant. Proceed with standard documentation.' : `STOP: ${risks.filter(r => r.severity === 'critical').length} critical compliance issue(s) detected. Consult SOP-001 before proceeding.` })
+})
+
+app.get('/api/compliance/fcra-rights', (c) => {
+  return c.json({
+    title: 'Consumer Credit File Rights Under State and Federal Law',
+    required_disclosure: true,
+    fcra_summary: 'The Fair Credit Reporting Act (FCRA) gives you specific rights. You must receive a copy of this notice before signing a contract with a credit repair organization.',
+    rights: [
+      'You have a right to dispute inaccurate information in your credit report by contacting the credit bureau directly.',
+      'There is no fee for correcting inaccurate information with a credit bureau.',
+      'Any legitimate credit bureau must investigate disputed items within 30 days.',
+      'You may dispute inaccurate items for free without a credit repair organization.',
+      'You have a right to sue a credit repair organization that violates the CROA.',
+      'You have a 3-day right to cancel a contract with any credit repair organization.',
+      'Credit repair organizations cannot promise to remove accurate information.',
+      'You have the right to a copy of your credit report upon request.'
+    ],
+    bureau_contacts: {
+      equifax: { phone: '1-800-685-1111', dispute_url: 'https://dispute.equifax.com', mail: 'P.O. Box 740256, Atlanta, GA 30374' },
+      transunion: { phone: '1-800-916-8800', dispute_url: 'https://dispute.transunion.com', mail: 'P.O. Box 2000, Chester, PA 19016' },
+      experian: { phone: '1-888-397-3742', dispute_url: 'https://experian.com/disputes', mail: 'P.O. Box 4500, Allen, TX 75013' }
+    }
+  })
+})
+
+app.post('/api/compliance/bureau-response', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, dispute_id, bureau, response_type, response_date, items_deleted, items_verified, items_updated, tracking_number, response_method, raw_response } = await c.req.json() as any
+  if (!client_id || !bureau || !response_type) return c.json({ error: 'client_id, bureau, and response_type required' }, 400)
+  const result = await DB.prepare(`INSERT INTO bureau_responses (client_id, dispute_id, bureau, response_type, response_date, items_deleted, items_verified, items_updated, tracking_number, response_method, raw_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(client_id, dispute_id || null, bureau, response_type, response_date || null, items_deleted || 0, items_verified || 0, items_updated || 0, tracking_number || null, response_method || 'mail', raw_response || null).run()
+  if (dispute_id) {
+    const newStatus = response_type === 'deleted' ? 'deleted' : response_type === 'verified' ? 'escalated' : 'investigating'
+    await DB.prepare(`UPDATE disputes SET status = ? WHERE id = ?`).bind(newStatus, dispute_id).run()
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'bureau_response_logged', 'dispute', ?, ?)`).bind(dispute_id || 0, `${bureau} responded: ${response_type} — Deleted: ${items_deleted || 0}, Verified: ${items_verified || 0}`).run()
+  const nextSop = response_type === 'deleted' ? 'SOP-108: Document deletion, update client record, celebrate win' : response_type === 'verified' ? 'SOP-109: Escalate — request method of verification, consider legal referral' : 'SOP-107: Follow up if no response in 35 days'
+  return c.json({ success: true, response_id: result.meta.last_row_id, next_action: nextSop })
+})
+
+app.get('/api/compliance/bureau-responses/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const responses = await DB.prepare(`SELECT br.*, d.account_name, d.bureau as dispute_bureau FROM bureau_responses br LEFT JOIN disputes d ON d.id = br.dispute_id WHERE br.client_id = ? ORDER BY br.received_date DESC`).bind(clientId).all()
+  const stats = await DB.prepare(`SELECT bureau, response_type, COUNT(*) as count, SUM(items_deleted) as total_deleted FROM bureau_responses WHERE client_id = ? GROUP BY bureau, response_type`).bind(clientId).all()
+  return c.json({ responses: responses.results, stats: stats.results })
+})
+
+app.get('/api/compliance/audit/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const audits = await DB.prepare(`SELECT * FROM compliance_audits WHERE client_id = ? ORDER BY checked_at DESC LIMIT 100`).bind(clientId).all()
+  const summary = await DB.prepare(`SELECT law, compliant, risk_level, COUNT(*) as count FROM compliance_audits WHERE client_id = ? GROUP BY law, compliant, risk_level`).bind(clientId).all()
+  return c.json({ audits: audits.results, summary: summary.results })
+})
+
+// ============================================================
+// AFFILIATE / REFERRAL PROGRAM
+// ============================================================
+
+app.post('/api/affiliates', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, email, commission_pct } = await c.req.json() as any
+  if (!name || !email) return c.json({ error: 'name and email required' }, 400)
+  const code = (name.toLowerCase().replace(/[^a-z0-9]/g, '') + Math.random().toString(36).substring(2, 6)).substring(0, 12).toUpperCase()
+  const result = await DB.prepare(`INSERT INTO affiliates (name, email, referral_code, commission_pct) VALUES (?, ?, ?, ?)`).bind(name, email, code, commission_pct || 20).run()
+  return c.json({ success: true, affiliate_id: result.meta.last_row_id, referral_code: code, referral_link: `https://rjbusinesssolutions.org/?ref=${code}`, commission_pct: commission_pct || 20 }, 201)
+})
+
+app.get('/api/affiliates', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const affiliates = await DB.prepare(`SELECT * FROM affiliates ORDER BY total_earned_cents DESC`).all()
+  return c.json({ affiliates: affiliates.results })
+})
+
+app.post('/api/affiliates/track', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { referral_code, client_id, source_url } = await c.req.json() as any
+  if (!referral_code) return c.json({ error: 'referral_code required' }, 400)
+  const affiliate = await DB.prepare(`SELECT * FROM affiliates WHERE referral_code = ? AND is_active = 1`).bind(referral_code).first() as any
+  if (!affiliate) return c.json({ error: 'Invalid referral code' }, 404)
+  await DB.prepare(`INSERT INTO referrals (affiliate_id, client_id, referral_code, source_url, commission_pct) VALUES (?, ?, ?, ?, ?)`)
+    .bind(affiliate.id, client_id || null, referral_code, source_url || null, affiliate.commission_pct).run()
+  await DB.prepare(`UPDATE affiliates SET total_referrals = total_referrals + 1 WHERE id = ?`).bind(affiliate.id).run()
+  return c.json({ success: true, affiliate_name: affiliate.name, commission_pct: affiliate.commission_pct })
+})
+
+app.get('/api/affiliates/:id/stats', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const affiliate = await DB.prepare(`SELECT * FROM affiliates WHERE id = ?`).bind(id).first() as any
+  if (!affiliate) return c.json({ error: 'Affiliate not found' }, 404)
+  const referrals = await DB.prepare(`SELECT r.*, c.first_name, c.last_name, c.status, cs.plan_name, cs.plan_price FROM referrals r LEFT JOIN clients c ON c.id = r.client_id LEFT JOIN client_subscriptions cs ON cs.client_id = r.client_id AND cs.status = 'active' WHERE r.affiliate_id = ? ORDER BY r.created_at DESC`).bind(id).all()
+  return c.json({ affiliate, referrals: referrals.results, payout_due: Math.round((affiliate.total_earned_cents - affiliate.total_paid_cents) / 100) })
+})
+
 export default app
