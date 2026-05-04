@@ -3742,4 +3742,807 @@ app.get('/api/affiliates/:id/stats', async (c) => {
   return c.json({ affiliate, referrals: referrals.results, payout_due: Math.round((affiliate.total_earned_cents - affiliate.total_paid_cents) / 100) })
 })
 
+// ============================================================
+// CLIENT PORTAL — Self-service client view
+// ============================================================
+
+app.post('/api/portal/generate', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, expires_days } = await c.req.json() as any
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const client = await DB.prepare(`SELECT id, first_name, last_name, email FROM clients WHERE id = ?`).bind(client_id).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
+  const days = expires_days || 365
+  await DB.prepare(`INSERT INTO portal_tokens (client_id, token, expires_at) VALUES (?, ?, datetime('now', '+${days} days'))`).bind(client_id, token).run()
+  const baseUrl = c.env.APP_BASE_URL || c.env.CLOUDFLARE_PAGES_URL || 'https://rjbusinesssolutions.org'
+  return c.json({ success: true, token, portal_url: `${baseUrl}/portal/${token}`, expires_days: days, client_name: `${client.first_name} ${client.last_name}` }, 201)
+})
+
+app.get('/api/portal/data/:token', async (c) => {
+  const { DB } = c.env; const token = c.req.param('token')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const pt = await DB.prepare(`SELECT * FROM portal_tokens WHERE token = ? AND expires_at > datetime('now')`).bind(token).first() as any
+  if (!pt) return c.json({ error: 'Invalid or expired portal link' }, 401)
+  await DB.prepare(`UPDATE portal_tokens SET last_accessed = datetime('now'), access_count = access_count + 1 WHERE id = ?`).bind(pt.id).run()
+  const client = await DB.prepare(`SELECT id, first_name, last_name, email, phone, status, credit_score_start, credit_score_current, credit_score_goal, monthly_fee, onboarding_date, notes FROM clients WHERE id = ?`).bind(pt.client_id).first() as any
+  const disputes = await DB.prepare(`SELECT id, bureau, account_name, status, dispute_reason, result, created_at, updated_at FROM disputes WHERE client_id = ? ORDER BY created_at DESC`).bind(pt.client_id).all()
+  const rounds = await DB.prepare(`SELECT * FROM dispute_rounds WHERE client_id = ? ORDER BY round_number DESC`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const scoreHistory = await DB.prepare(`SELECT * FROM credit_report_scores WHERE report_id IN (SELECT id FROM credit_reports WHERE client_id = ?) ORDER BY pulled_at DESC LIMIT 20`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const subscription = await DB.prepare(`SELECT plan_name, plan_price, status, current_period_end FROM client_subscriptions WHERE client_id = ? AND status = 'active' LIMIT 1`).bind(pt.client_id).first().catch(() => null)
+  const comms = await DB.prepare(`SELECT id, type, message, status, created_at FROM communications WHERE client_id = ? ORDER BY created_at DESC LIMIT 20`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const enrollments = await DB.prepare(`SELECT ce.*, cm.title, cm.phase FROM course_enrollments ce LEFT JOIN course_modules cm ON cm.id = ce.module_id WHERE ce.client_id = ?`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const alerts = await DB.prepare(`SELECT * FROM score_alerts WHERE client_id = ? AND is_actioned = 0 ORDER BY created_at DESC LIMIT 10`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const disputeStats = { total: disputes.results.length, deleted: disputes.results.filter((d: any) => d.status === 'deleted').length, updated: disputes.results.filter((d: any) => d.status === 'updated').length, pending: disputes.results.filter((d: any) => d.status === 'pending' || d.status === 'sent').length }
+  return c.json({ client, disputes: disputes.results, dispute_stats: disputeStats, rounds: rounds.results, score_history: scoreHistory.results, subscription, communications: comms.results, course_enrollments: enrollments.results, alerts: alerts.results })
+})
+
+app.get('/portal/:token', async (c) => {
+  const { DB } = c.env; const token = c.req.param('token')
+  const baseUrl = c.env.APP_BASE_URL || 'https://rjbusinesssolutions.org'
+  if (!DB) return c.html(`<!DOCTYPE html><html><head><title>Portal</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-50 flex items-center justify-center min-h-screen"><div class="text-center"><h1 class="text-2xl font-bold text-gray-800">Database not connected</h1><p class="text-gray-500 mt-2">Connect D1 database to enable client portal</p></div></body></html>`)
+  const pt = await DB.prepare(`SELECT * FROM portal_tokens WHERE token = ? AND expires_at > datetime('now')`).bind(token).first() as any
+  if (!pt) return c.html(`<!DOCTYPE html><html><head><title>Portal — Link Expired</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-50 flex items-center justify-center min-h-screen"><div class="text-center p-8 bg-white rounded-xl shadow"><div class="text-5xl mb-4">🔗</div><h1 class="text-2xl font-bold text-gray-800">Link Invalid or Expired</h1><p class="text-gray-500 mt-2">Please contact your credit advisor for a new portal link.</p><p class="text-sm text-gray-400 mt-4">RJ Business Solutions • (505) 429-6239</p></div></body></html>`, 401)
+  const client = await DB.prepare(`SELECT id, first_name, last_name, email, phone, status, credit_score_start, credit_score_current, credit_score_goal, onboarding_date FROM clients WHERE id = ?`).bind(pt.client_id).first() as any
+  if (!client) return c.html(`<!DOCTYPE html><html><body>Client not found</body></html>`, 404)
+  await DB.prepare(`UPDATE portal_tokens SET last_accessed = datetime('now'), access_count = access_count + 1 WHERE id = ?`).bind(pt.id).run()
+  const disputes = await DB.prepare(`SELECT bureau, account_name, status, dispute_reason, result, created_at FROM disputes WHERE client_id = ? ORDER BY created_at DESC`).bind(pt.client_id).all()
+  const rounds = await DB.prepare(`SELECT * FROM dispute_rounds WHERE client_id = ? ORDER BY round_number, bureau`).bind(pt.client_id).all().catch(() => ({ results: [] }))
+  const subscription = await DB.prepare(`SELECT plan_name, status, current_period_end FROM client_subscriptions WHERE client_id = ? LIMIT 1`).bind(pt.client_id).first().catch(() => null) as any
+  const disputeStats = { total: disputes.results.length, deleted: disputes.results.filter((d: any) => d.result === 'deleted').length, updated: disputes.results.filter((d: any) => d.result === 'updated').length, pending: disputes.results.filter((d: any) => ['pending','sent','investigating'].includes(d.status)).length }
+  const avgScore = client.credit_score_current || client.credit_score_start || 0
+  const roundsHtml = rounds.results.length > 0 ? rounds.results.map((r: any) => `<div class="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"><div><span class="font-medium text-gray-800">Round ${r.round_number} — ${r.bureau}</span><span class="ml-2 text-xs text-gray-500">${r.items_disputed ? JSON.parse(r.items_disputed).length + ' items' : ''}</span></div><span class="px-2 py-1 rounded text-xs font-medium ${r.status === 'sent' ? 'bg-blue-100 text-blue-700' : r.status === 'response_received' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}">${r.status.replace(/_/g,' ')}</span></div>`).join('') : '<p class="text-gray-400 text-sm">No rounds filed yet</p>'
+  const disputesHtml = disputes.results.slice(0, 10).map((d: any) => `<div class="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"><div><p class="font-medium text-gray-800 text-sm">${d.account_name || 'Unknown Account'}</p><p class="text-xs text-gray-500">${d.bureau || ''} • ${d.dispute_reason || ''}</p></div><span class="px-2 py-1 rounded text-xs font-medium ${d.result === 'deleted' ? 'bg-green-100 text-green-700' : d.result === 'updated' ? 'bg-blue-100 text-blue-700' : d.result === 'verified' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}">${d.result || d.status || 'pending'}</span></div>`).join('')
+  return c.html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Credit Portal — RJ Business Solutions</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<header class="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <div class="w-8 h-8 bg-blue-900 rounded-lg flex items-center justify-center text-white font-bold text-sm">RJ</div>
+    <div><div class="font-bold text-gray-900 text-sm">RJ Business Solutions</div><div class="text-xs text-gray-500">Client Credit Portal</div></div>
+  </div>
+  <div class="text-right"><div class="font-semibold text-gray-800">${client.first_name} ${client.last_name}</div><div class="text-xs text-gray-500">Status: <span class="font-medium text-green-600">${client.status || 'Active'}</span></div></div>
+</header>
+<main class="max-w-4xl mx-auto px-4 py-8 space-y-6">
+  <!-- Score Cards -->
+  <div class="grid grid-cols-4 gap-4">
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-gray-100 col-span-1">
+      <div class="text-xs text-gray-500 font-medium uppercase tracking-wide mb-1">Avg Score</div>
+      <div class="text-3xl font-bold ${avgScore >= 700 ? 'text-green-600' : avgScore >= 620 ? 'text-yellow-600' : 'text-red-600'}">${avgScore || '—'}</div>
+      <div class="text-xs text-gray-400 mt-1">3-Bureau Average</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+      <div class="text-xs text-gray-500 font-medium uppercase tracking-wide mb-1">Equifax</div>
+      <div class="text-2xl font-bold text-gray-800">${client.credit_score_eq || '—'}</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+      <div class="text-xs text-gray-500 font-medium uppercase tracking-wide mb-1">Experian</div>
+      <div class="text-2xl font-bold text-gray-800">${client.credit_score_ex || '—'}</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+      <div class="text-xs text-gray-500 font-medium uppercase tracking-wide mb-1">TransUnion</div>
+      <div class="text-2xl font-bold text-gray-800">${client.credit_score_tu || '—'}</div>
+    </div>
+  </div>
+  <!-- Progress Stats -->
+  <div class="grid grid-cols-4 gap-4">
+    <div class="bg-blue-50 rounded-xl p-4 text-center border border-blue-100"><div class="text-2xl font-bold text-blue-700">${disputeStats.total}</div><div class="text-xs text-blue-600 mt-1">Items Disputed</div></div>
+    <div class="bg-green-50 rounded-xl p-4 text-center border border-green-100"><div class="text-2xl font-bold text-green-700">${disputeStats.deleted}</div><div class="text-xs text-green-600 mt-1">Deleted</div></div>
+    <div class="bg-purple-50 rounded-xl p-4 text-center border border-purple-100"><div class="text-2xl font-bold text-purple-700">${disputeStats.updated}</div><div class="text-xs text-purple-600 mt-1">Updated</div></div>
+    <div class="bg-yellow-50 rounded-xl p-4 text-center border border-yellow-100"><div class="text-2xl font-bold text-yellow-700">${disputeStats.pending}</div><div class="text-xs text-yellow-600 mt-1">Pending</div></div>
+  </div>
+  <!-- Dispute Rounds -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <h2 class="font-bold text-gray-800 mb-4">Dispute Rounds</h2>
+    ${roundsHtml}
+  </div>
+  <!-- Active Disputes -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <h2 class="font-bold text-gray-800 mb-4">Your Disputes (${disputes.results.length} total)</h2>
+    ${disputesHtml || '<p class="text-gray-400 text-sm">No disputes on file yet</p>'}
+    ${disputes.results.length > 10 ? `<p class="text-xs text-gray-400 mt-3">${disputes.results.length - 10} more not shown — contact your advisor for full report</p>` : ''}
+  </div>
+  ${subscription ? `<div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6"><h2 class="font-bold text-gray-800 mb-2">Your Plan</h2><div class="flex items-center justify-between"><span class="font-semibold text-blue-700 capitalize">${(subscription as any).plan_name} Plan</span><span class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded font-medium">${(subscription as any).status}</span></div><p class="text-xs text-gray-500 mt-1">Renews ${(subscription as any).current_period_end ? new Date((subscription as any).current_period_end).toLocaleDateString() : 'monthly'}</p></div>` : ''}
+  <!-- Contact -->
+  <div class="bg-blue-900 rounded-xl p-6 text-white text-center">
+    <div class="font-bold text-lg mb-1">Questions? We're here to help.</div>
+    <div class="text-blue-200 text-sm">📞 (505) 429-6239 &nbsp;|&nbsp; ✉️ rjbiz2022@gmail.com</div>
+    <div class="text-blue-300 text-xs mt-2">Member since ${client.start_date ? new Date(client.start_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : 'enrollment'}</div>
+  </div>
+</main>
+</body></html>`)
+})
+
+// ============================================================
+// EMAIL SEQUENCES — Drip campaign engine
+// ============================================================
+
+app.get('/api/email/sequences', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const sequences = await DB.prepare(`SELECT * FROM email_sequences ORDER BY trigger_event, delay_days`).all()
+  return c.json({ sequences: sequences.results, total: sequences.results.length })
+})
+
+app.post('/api/email/sequences', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, trigger_event, delay_days, subject, body_template } = await c.req.json() as any
+  if (!name || !trigger_event || !subject || !body_template) return c.json({ error: 'name, trigger_event, subject, body_template required' }, 400)
+  const result = await DB.prepare(`INSERT INTO email_sequences (name, trigger_event, delay_days, subject, body_template) VALUES (?, ?, ?, ?, ?)`).bind(name, trigger_event, delay_days || 0, subject, body_template).run()
+  return c.json({ success: true, sequence_id: result.meta.last_row_id }, 201)
+})
+
+app.post('/api/email/sequences/enroll', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, trigger_event } = await c.req.json() as any
+  if (!client_id || !trigger_event) return c.json({ error: 'client_id and trigger_event required' }, 400)
+  const sequences = await DB.prepare(`SELECT * FROM email_sequences WHERE trigger_event = ? AND is_active = 1 ORDER BY delay_days`).bind(trigger_event).all()
+  if (sequences.results.length === 0) return c.json({ error: 'No active sequences for this trigger' }, 404)
+  let enrolled = 0
+  for (const seq of sequences.results as any[]) {
+    const next = new Date(); next.setDate(next.getDate() + (seq.delay_days || 0))
+    await DB.prepare(`INSERT OR IGNORE INTO sequence_enrollments (client_id, sequence_id, next_send_at) VALUES (?, ?, ?)`).bind(client_id, seq.id, next.toISOString()).run()
+    enrolled++
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'sequence_enrolled', 'client', ?, ?)`).bind(client_id, `Enrolled in ${enrolled} sequences for trigger: ${trigger_event}`).run().catch(() => {})
+  return c.json({ success: true, enrolled_sequences: enrolled, trigger_event })
+})
+
+app.post('/api/email/sequences/process', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const due = await DB.prepare(`SELECT se.*, es.subject, es.body_template, es.name as seq_name, c.first_name, c.last_name, c.email FROM sequence_enrollments se JOIN email_sequences es ON es.id = se.sequence_id JOIN clients c ON c.id = se.client_id WHERE se.status = 'active' AND se.next_send_at <= datetime('now')`).all()
+  let sent = 0; const errors: string[] = []
+  for (const row of due.results as any[]) {
+    const body = row.body_template.replace(/\{\{name\}\}/g, row.first_name).replace(/\{\{full_name\}\}/g, `${row.first_name} ${row.last_name}`)
+    await DB.prepare(`INSERT INTO email_sends (client_id, to_email, subject, body, template_name, status) VALUES (?, ?, ?, ?, ?, 'queued')`).bind(row.client_id, row.email, row.subject, body, row.seq_name).run()
+    await DB.prepare(`UPDATE sequence_enrollments SET sends_completed = sends_completed + 1, status = 'completed', next_send_at = NULL WHERE id = ?`).bind(row.id).run()
+    sent++
+  }
+  return c.json({ processed: due.results.length, queued_for_send: sent, errors })
+})
+
+app.get('/api/email/history/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const emails = await DB.prepare(`SELECT * FROM email_sends WHERE client_id = ? ORDER BY created_at DESC LIMIT 50`).bind(clientId).all()
+  return c.json({ emails: emails.results, total: emails.results.length })
+})
+
+// ============================================================
+// CRM PIPELINE — Full lead management
+// ============================================================
+
+const PIPELINE_STAGES = ['new', 'contacted', 'qualified', 'consultation_scheduled', 'proposal_sent', 'won', 'lost']
+
+app.get('/api/leads', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const stage = c.req.query('stage'); const source = c.req.query('source')
+  let query = `SELECT l.*, s.name as assigned_name FROM crm_leads l LEFT JOIN staff_users s ON s.id = l.assigned_staff_id`
+  const params: any[] = []
+  const conditions: string[] = []
+  if (stage) { conditions.push('l.stage = ?'); params.push(stage) }
+  if (source) { conditions.push('l.source = ?'); params.push(source) }
+  if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ')
+  query += ' ORDER BY l.created_at DESC LIMIT 200'
+  const leads = await DB.prepare(query).bind(...params).all()
+  return c.json({ leads: leads.results, total: leads.results.length, stages: PIPELINE_STAGES })
+})
+
+app.put('/api/leads/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const updates = await c.req.json() as any
+  const allowed = ['name', 'email', 'phone', 'source', 'stage', 'score', 'score_grade', 'ltv_estimate', 'notes', 'assigned_staff_id', 'utm_source', 'utm_medium', 'utm_campaign', 'lost_reason']
+  const fields = Object.keys(updates).filter(k => allowed.includes(k))
+  if (fields.length === 0) return c.json({ error: 'No valid fields to update' }, 400)
+  const setClause = fields.map(f => `${f} = ?`).join(', ')
+  const vals = fields.map(f => updates[f])
+  await DB.prepare(`UPDATE crm_leads SET ${setClause}, updated_at = datetime('now') WHERE id = ?`).bind(...vals, id).run()
+  const lead = await DB.prepare(`SELECT * FROM crm_leads WHERE id = ?`).bind(id).first()
+  return c.json({ success: true, lead })
+})
+
+app.delete('/api/leads/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  await DB.prepare(`DELETE FROM crm_leads WHERE id = ?`).bind(id).run()
+  return c.json({ success: true })
+})
+
+app.post('/api/leads/:id/convert', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const lead = await DB.prepare(`SELECT * FROM crm_leads WHERE id = ?`).bind(id).first() as any
+  if (!lead) return c.json({ error: 'Lead not found' }, 404)
+  if (lead.converted_client_id) return c.json({ error: 'Lead already converted', client_id: lead.converted_client_id }, 409)
+  const [first, ...rest] = (lead.name || 'Unknown').split(' ')
+  const result = await DB.prepare(`INSERT INTO clients (first_name, last_name, email, phone, status, monthly_fee, source, onboarding_date) VALUES (?, ?, ?, ?, 'active', 0, 'crm', date('now'))`).bind(first, rest.join(' ') || '', lead.email || '', lead.phone || '').run()
+  const clientId = result.meta.last_row_id
+  await DB.prepare(`UPDATE crm_leads SET stage = 'won', converted_client_id = ?, updated_at = datetime('now') WHERE id = ?`).bind(clientId, id).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('crm', 'lead_converted', 'client', ?, ?)`).bind(clientId, `Converted from lead ${id}: ${lead.name}`).run().catch(() => {})
+  if (lead.affiliate_id) {
+    await DB.prepare(`INSERT INTO referrals (affiliate_id, client_id, referral_code, commission_pct) SELECT id, ?, referral_code, commission_pct FROM affiliates WHERE id = ?`).bind(clientId, lead.affiliate_id).run().catch(() => {})
+  }
+  return c.json({ success: true, client_id: clientId, lead_id: Number(id), message: 'Lead converted to client' }, 201)
+})
+
+app.get('/api/leads/pipeline', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const pipeline: Record<string, any[]> = {}
+  for (const stage of PIPELINE_STAGES) pipeline[stage] = []
+  const leads = await DB.prepare(`SELECT l.*, s.name as assigned_name FROM crm_leads l LEFT JOIN staff_users s ON s.id = l.assigned_staff_id WHERE l.converted_client_id IS NULL ORDER BY l.score DESC, l.created_at DESC`).all()
+  for (const lead of leads.results as any[]) {
+    const stage = lead.stage || 'new'
+    if (!pipeline[stage]) pipeline[stage] = []
+    pipeline[stage].push(lead)
+  }
+  const stats = { total: leads.results.length, by_stage: Object.fromEntries(PIPELINE_STAGES.map(s => [s, pipeline[s].length])), total_ltv: (leads.results as any[]).reduce((a, l) => a + (l.ltv_estimate || 0), 0), avg_score: leads.results.length ? Math.round((leads.results as any[]).reduce((a, l) => a + (l.score || 0), 0) / leads.results.length) : 0 }
+  return c.json({ pipeline, stats, stages: PIPELINE_STAGES })
+})
+
+// ============================================================
+// ANALYTICS & REPORTING — Business intelligence
+// ============================================================
+
+app.get('/api/analytics/overview', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const clients = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active, SUM(CASE WHEN graduation_date IS NOT NULL THEN 1 ELSE 0 END) as graduated, SUM(monthly_fee) as total_mrr FROM clients`).first() as any
+    const disputes = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN result='deleted' THEN 1 ELSE 0 END) as deleted, SUM(CASE WHEN result='updated' THEN 1 ELSE 0 END) as updated, SUM(CASE WHEN status IN ('pending','sent','investigating') THEN 1 ELSE 0 END) as pending FROM disputes`).first() as any
+    const leads = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) as won, SUM(CASE WHEN stage='lost' THEN 1 ELSE 0 END) as lost, AVG(ltv_estimate) as avg_ltv FROM crm_leads`).first() as any
+    const revenue = await DB.prepare(`SELECT SUM(plan_price) as mrr FROM client_subscriptions WHERE status='active'`).first() as any
+    const ai_spend = await DB.prepare(`SELECT SUM(cost_cents) as total FROM ai_jobs`).first() as any
+    const affiliates = await DB.prepare(`SELECT COUNT(*) as total, SUM(total_referrals) as referrals, SUM(total_earned_cents) as earned FROM affiliates WHERE is_active=1`).first() as any
+    const conversionRate = (leads as any)?.total > 0 ? Math.round(((leads as any).won / (leads as any).total) * 100) : 0
+    const disputeSuccessRate = (disputes as any)?.total > 0 ? Math.round((((disputes as any).deleted + (disputes as any).updated) / (disputes as any).total) * 100) : 0
+    return c.json({ clients, disputes, dispute_success_rate: disputeSuccessRate, leads: { ...leads, conversion_rate: conversionRate }, revenue: { mrr_from_subscriptions: (revenue as any)?.mrr || 0, mrr_from_clients: (clients as any)?.total_mrr || 0, arr: ((revenue as any)?.mrr || 0) * 12 }, ai_spend_cents: (ai_spend as any)?.total || 0, affiliates, generated_at: new Date().toISOString() })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.get('/api/analytics/revenue', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const byPlan = await DB.prepare(`SELECT plan_name, COUNT(*) as count, SUM(plan_price) as mrr FROM client_subscriptions WHERE status='active' GROUP BY plan_name`).all()
+    const monthly = await DB.prepare(`SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as new_subs, SUM(plan_price) as new_mrr FROM client_subscriptions GROUP BY month ORDER BY month DESC LIMIT 12`).all()
+    const churn = await DB.prepare(`SELECT COUNT(*) as cancelled FROM client_subscriptions WHERE status='cancelled' AND updated_at >= date('now', '-30 days')`).first() as any
+    const total = await DB.prepare(`SELECT SUM(plan_price) as mrr, COUNT(*) as active FROM client_subscriptions WHERE status='active'`).first() as any
+    return c.json({ current_mrr: (total as any)?.mrr || 0, current_arr: ((total as any)?.mrr || 0) * 12, active_subscriptions: (total as any)?.active || 0, by_plan: byPlan.results, monthly_trend: monthly.results, churn_last_30d: (churn as any)?.cancelled || 0 })
+  } catch { return c.json({ current_mrr: 0, current_arr: 0, active_subscriptions: 0, by_plan: [], monthly_trend: [], churn_last_30d: 0 }) }
+})
+
+app.get('/api/analytics/disputes', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const byBureau = await DB.prepare(`SELECT bureau, COUNT(*) as total, SUM(CASE WHEN result='deleted' THEN 1 ELSE 0 END) as deleted, SUM(CASE WHEN result='updated' THEN 1 ELSE 0 END) as updated, SUM(CASE WHEN result='verified' THEN 1 ELSE 0 END) as verified FROM disputes GROUP BY bureau`).all()
+    const byStatus = await DB.prepare(`SELECT status, COUNT(*) as total FROM disputes GROUP BY status ORDER BY total DESC`).all()
+    const avgResolution = await DB.prepare(`SELECT AVG(julianday(updated_at) - julianday(created_at)) as avg_days FROM disputes WHERE result IN ('deleted','updated','verified')`).first() as any
+    const monthly = await DB.prepare(`SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as filed, SUM(CASE WHEN result='deleted' THEN 1 ELSE 0 END) as deleted FROM disputes GROUP BY month ORDER BY month DESC LIMIT 12`).all()
+    const rounds = await DB.prepare(`SELECT round_number, bureau, COUNT(*) as count, SUM(CASE WHEN outcome='deleted' THEN 1 ELSE 0 END) as deleted FROM dispute_rounds GROUP BY round_number, bureau ORDER BY round_number`).all().catch(() => ({ results: [] }))
+    return c.json({ by_bureau: byBureau.results, by_status: byStatus.results, avg_resolution_days: Math.round((avgResolution as any)?.avg_days || 0), monthly_trend: monthly.results, by_round: rounds.results })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.get('/api/analytics/clients', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const statusBreakdown = await DB.prepare(`SELECT status, COUNT(*) as count FROM clients GROUP BY status`).all()
+    const avgScore = await DB.prepare(`SELECT AVG(credit_score_start) as start_avg, AVG(credit_score_current) as current_avg, AVG(credit_score_goal) as goal_avg FROM clients WHERE credit_score_start > 0`).first() as any
+    const scoreGain = await DB.prepare(`SELECT AVG(credit_score_current - credit_score_start) as avg_gain FROM clients WHERE credit_score_start > 0 AND credit_score_current > 0`).first() as any
+    const retention = await DB.prepare(`SELECT SUM(CASE WHEN graduation_date IS NOT NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as grad_rate FROM clients`).first() as any
+    const byMonth = await DB.prepare(`SELECT strftime('%Y-%m', onboarding_date) as month, COUNT(*) as new_clients FROM clients GROUP BY month ORDER BY month DESC LIMIT 12`).all()
+    const top = await DB.prepare(`SELECT id, first_name, last_name, credit_score_start, credit_score_current, monthly_fee, status FROM clients ORDER BY monthly_fee DESC LIMIT 10`).all()
+    return c.json({ status_breakdown: statusBreakdown.results, avg_credit_scores: { start: Math.round((avgScore as any)?.start_avg || 0), current: Math.round((avgScore as any)?.current_avg || 0), goal: Math.round((avgScore as any)?.goal_avg || 0), avg_gain: Math.round((scoreGain as any)?.avg_gain || 0) }, graduation_rate: Math.round((retention as any)?.grad_rate || 0), monthly_new_clients: byMonth.results, top_clients_by_revenue: top.results })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+app.get('/api/analytics/leads', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const bySource = await DB.prepare(`SELECT source, COUNT(*) as total, SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) as won, AVG(ltv_estimate) as avg_ltv FROM crm_leads GROUP BY source ORDER BY total DESC`).all()
+    const byStage = await DB.prepare(`SELECT stage, COUNT(*) as count, AVG(score) as avg_score FROM crm_leads GROUP BY stage`).all()
+    const monthly = await DB.prepare(`SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as leads, SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) as converted FROM crm_leads GROUP BY month ORDER BY month DESC LIMIT 12`).all()
+    const topSources = (bySource.results as any[]).map(s => ({ ...s, conversion_rate: s.total > 0 ? Math.round((s.won / s.total) * 100) : 0 }))
+    return c.json({ by_source: topSources, by_stage: byStage.results, monthly_trend: monthly.results, funnel: PIPELINE_STAGES.map(stage => ({ stage, count: (byStage.results as any[]).find(r => r.stage === stage)?.count || 0 })) })
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+// ============================================================
+// STAFF MANAGEMENT — Users, roles, workload
+// ============================================================
+
+app.get('/api/staff', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const staff = await DB.prepare(`SELECT s.*, (SELECT COUNT(*) FROM clients c WHERE c.assigned_to = s.id) as client_count, (SELECT COUNT(*) FROM ops_tasks t WHERE t.assigned_to = s.id AND t.status != 'completed') as open_tasks FROM staff_users s ORDER BY s.role, s.name`).all().catch(async () => DB.prepare(`SELECT * FROM staff_users ORDER BY role, name`).all())
+  return c.json({ staff: (staff as any).results, total: (staff as any).results.length, roles: ['admin', 'manager', 'agent', 'viewer'] })
+})
+
+app.post('/api/staff', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, email, role, permissions, max_clients } = await c.req.json() as any
+  if (!name || !email) return c.json({ error: 'name and email required' }, 400)
+  const rolePerms: Record<string, string[]> = { admin: ['read','write','delete','billing','compliance','admin'], manager: ['read','write','compliance','billing'], agent: ['read','write'], viewer: ['read'] }
+  const perms = permissions || rolePerms[role || 'agent'] || ['read']
+  const result = await DB.prepare(`INSERT INTO staff_users (name, email, role, permissions, max_clients) VALUES (?, ?, ?, ?, ?)`).bind(name, email, role || 'agent', JSON.stringify(perms), max_clients || 50).run()
+  return c.json({ success: true, staff_id: result.meta.last_row_id, name, email, role: role || 'agent', permissions: perms }, 201)
+})
+
+app.put('/api/staff/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const updates = await c.req.json() as any
+  const allowed = ['name', 'email', 'role', 'permissions', 'max_clients', 'is_active']
+  const fields = Object.keys(updates).filter(k => allowed.includes(k))
+  if (fields.length === 0) return c.json({ error: 'No valid fields' }, 400)
+  const vals = fields.map(f => f === 'permissions' && Array.isArray(updates[f]) ? JSON.stringify(updates[f]) : updates[f])
+  await DB.prepare(`UPDATE staff_users SET ${fields.map(f => f + ' = ?').join(', ')} WHERE id = ?`).bind(...vals, id).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/staff/:id/workload', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const staff = await DB.prepare(`SELECT * FROM staff_users WHERE id = ?`).bind(id).first()
+  if (!staff) return c.json({ error: 'Staff not found' }, 404)
+  const clients = await DB.prepare(`SELECT id, first_name, last_name, status, credit_score_eq, monthly_fee FROM clients WHERE assigned_to = ?`).bind(id).all().catch(() => ({ results: [] }))
+  const tasks = await DB.prepare(`SELECT t.*, c.first_name, c.last_name FROM ops_tasks t LEFT JOIN clients c ON c.id = t.client_id WHERE t.assigned_to = ? AND t.status != 'completed' ORDER BY t.due_date`).bind(id).all().catch(() => ({ results: [] }))
+  const leads = await DB.prepare(`SELECT * FROM crm_leads WHERE assigned_staff_id = ? AND stage NOT IN ('won','lost') ORDER BY score DESC`).bind(id).all().catch(() => ({ results: [] }))
+  return c.json({ staff, clients: clients.results, open_tasks: tasks.results, active_leads: leads.results, summary: { client_count: clients.results.length, open_task_count: tasks.results.length, lead_count: leads.results.length } })
+})
+
+// ============================================================
+// DISPUTE ROUNDS — R1/R2/R3 automated tracking
+// ============================================================
+
+app.get('/api/disputes/rounds/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const rounds = await DB.prepare(`SELECT * FROM dispute_rounds WHERE client_id = ? ORDER BY round_number, bureau`).bind(clientId).all()
+  const summary: Record<string, any> = {}
+  for (const r of rounds.results as any[]) {
+    if (!summary[`R${r.round_number}`]) summary[`R${r.round_number}`] = { round: r.round_number, bureaus: {}, status: 'in_progress' }
+    summary[`R${r.round_number}`].bureaus[r.bureau] = r.status
+  }
+  return c.json({ rounds: rounds.results, summary: Object.values(summary), total_rounds: rounds.results.length })
+})
+
+app.post('/api/disputes/rounds', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, round_number, bureau, items_disputed, letter_content, tracking_number } = await c.req.json() as any
+  if (!client_id || !bureau) return c.json({ error: 'client_id and bureau required' }, 400)
+  const lastRound = await DB.prepare(`SELECT MAX(round_number) as max_round FROM dispute_rounds WHERE client_id = ? AND bureau = ?`).bind(client_id, bureau).first() as any
+  const roundNum = round_number || ((lastRound?.max_round || 0) + 1)
+  const responseDate = new Date(); responseDate.setDate(responseDate.getDate() + 35)
+  const result = await DB.prepare(`INSERT INTO dispute_rounds (client_id, round_number, bureau, status, items_disputed, sent_at, response_due, letter_content, tracking_number) VALUES (?, ?, ?, 'sent', ?, datetime('now'), ?, ?, ?)`).bind(client_id, roundNum, bureau, JSON.stringify(items_disputed || []), responseDate.toISOString(), letter_content || null, tracking_number || null).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'dispute_round_filed', 'client', ?, ?)`).bind(client_id, `Round ${roundNum} filed with ${bureau}: ${(items_disputed || []).length} items`).run().catch(() => {})
+  return c.json({ success: true, round_id: result.meta.last_row_id, round_number: roundNum, bureau, response_due: responseDate.toISOString() }, 201)
+})
+
+app.post('/api/disputes/rounds/auto-generate', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id } = await c.req.json() as any
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(client_id).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const disputes = await DB.prepare(`SELECT * FROM disputes WHERE client_id = ? AND status IN ('pending','investigating','verified')`).bind(client_id).all()
+  if (disputes.results.length === 0) return c.json({ message: 'No pending disputes — client may be ready to graduate', client_id, pending_count: 0 })
+  const bureaus = ['equifax', 'experian', 'transunion']
+  const created: any[] = []
+  for (const bureau of bureaus) {
+    const bureauDisputes = disputes.results.filter((d: any) => d.bureau?.toLowerCase() === bureau || !d.bureau)
+    if (bureauDisputes.length === 0) continue
+    const lastRound = await DB.prepare(`SELECT MAX(round_number) as max_round FROM dispute_rounds WHERE client_id = ? AND bureau = ?`).bind(client_id, bureau).first() as any
+    const nextRound = (lastRound?.max_round || 0) + 1
+    if (nextRound > 5) { created.push({ bureau, skipped: true, reason: 'Max rounds (5) reached — recommend MOV or complaint' }); continue }
+    const letterTypes: Record<number, string> = { 1: 'Initial Dispute Letter', 2: 'Method of Verification Request', 3: 'Escalation / CFPB Pre-Complaint', 4: 'CFPB Complaint', 5: 'Final Notice / Legal Warning' }
+    const responseDate = new Date(); responseDate.setDate(responseDate.getDate() + 35)
+    const result = await DB.prepare(`INSERT INTO dispute_rounds (client_id, round_number, bureau, status, items_disputed, response_due) VALUES (?, ?, ?, 'pending', ?, ?)`).bind(client_id, nextRound, bureau, JSON.stringify(bureauDisputes.map((d: any) => d.id)), responseDate.toISOString()).run()
+    created.push({ round_id: result.meta.last_row_id, round_number: nextRound, bureau, letter_type: letterTypes[nextRound] || 'Dispute Letter', items_count: bureauDisputes.length, response_due: responseDate.toISOString() })
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('ai', 'auto_generated_rounds', 'client', ?, ?)`).bind(client_id, `Auto-generated dispute rounds for ${created.filter((r: any) => !r.skipped).length} bureaus`).run().catch(() => {})
+  return c.json({ success: true, client_id, rounds_created: created, total_pending_disputes: disputes.results.length })
+})
+
+app.put('/api/disputes/rounds/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { status, outcome, tracking_number, response_received } = await c.req.json() as any
+  await DB.prepare(`UPDATE dispute_rounds SET status = COALESCE(?, status), outcome = COALESCE(?, outcome), tracking_number = COALESCE(?, tracking_number), response_received = COALESCE(?, response_received) WHERE id = ?`).bind(status || null, outcome || null, tracking_number || null, response_received || null, id).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/disputes/round-stats', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const byRound = await DB.prepare(`SELECT round_number, bureau, COUNT(*) as total, SUM(CASE WHEN outcome='deleted' THEN 1 ELSE 0 END) as deleted, SUM(CASE WHEN outcome='updated' THEN 1 ELSE 0 END) as updated, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending FROM dispute_rounds GROUP BY round_number, bureau ORDER BY round_number, bureau`).all()
+  const overdue = await DB.prepare(`SELECT dr.*, c.first_name, c.last_name FROM dispute_rounds dr JOIN clients c ON c.id = dr.client_id WHERE dr.response_due < datetime('now') AND dr.status = 'sent' ORDER BY dr.response_due`).all()
+  return c.json({ by_round: byRound.results, overdue: overdue.results, overdue_count: overdue.results.length })
+})
+
+// ============================================================
+// SMS SEQUENCES — Drip SMS automation
+// ============================================================
+
+app.get('/api/sms/sequences', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const sequences = await DB.prepare(`SELECT * FROM sms_sequences ORDER BY trigger_event, delay_hours`).all()
+  return c.json({ sequences: sequences.results, total: sequences.results.length })
+})
+
+app.post('/api/sms/sequences', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, trigger_event, delay_hours, message_template } = await c.req.json() as any
+  if (!name || !trigger_event || !message_template) return c.json({ error: 'name, trigger_event, message_template required' }, 400)
+  if (message_template.length > 160) return c.json({ error: 'SMS messages must be 160 characters or less' }, 400)
+  const result = await DB.prepare(`INSERT INTO sms_sequences (name, trigger_event, delay_hours, message_template) VALUES (?, ?, ?, ?)`).bind(name, trigger_event, delay_hours || 0, message_template).run()
+  return c.json({ success: true, sequence_id: result.meta.last_row_id }, 201)
+})
+
+app.post('/api/sms/sequences/enroll', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, trigger_event } = await c.req.json() as any
+  if (!client_id || !trigger_event) return c.json({ error: 'client_id and trigger_event required' }, 400)
+  const sequences = await DB.prepare(`SELECT * FROM sms_sequences WHERE trigger_event = ? AND is_active = 1 ORDER BY delay_hours`).bind(trigger_event).all()
+  let enrolled = 0
+  for (const seq of sequences.results as any[]) {
+    const next = new Date(); next.setHours(next.getHours() + (seq.delay_hours || 0))
+    await DB.prepare(`INSERT OR IGNORE INTO sms_enrollments (client_id, sequence_id, next_send_at) VALUES (?, ?, ?)`).bind(client_id, seq.id, next.toISOString()).run()
+    enrolled++
+  }
+  return c.json({ success: true, enrolled_sequences: enrolled, trigger_event })
+})
+
+app.post('/api/sms/sequences/process', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const due = await DB.prepare(`SELECT se.*, ss.message_template, ss.name as seq_name, c.first_name, c.last_name, c.phone FROM sms_enrollments se JOIN sms_sequences ss ON ss.id = se.sequence_id JOIN clients c ON c.id = se.client_id WHERE se.status = 'active' AND se.next_send_at <= datetime('now') AND c.phone IS NOT NULL AND c.phone != ''`).all()
+  const queued: any[] = []
+  for (const row of due.results as any[]) {
+    const msg = row.message_template.replace(/\{\{name\}\}/g, row.first_name).replace(/\{\{full_name\}\}/g, `${row.first_name} ${row.last_name}`)
+    await DB.prepare(`INSERT INTO communications (client_id, type, direction, channel, message, status) VALUES (?, 'sms', 'outbound', 'twilio', ?, 'queued')`).bind(row.client_id, msg).run().catch(() => {})
+    await DB.prepare(`UPDATE sms_enrollments SET sends_completed = sends_completed + 1, status = 'completed' WHERE id = ?`).bind(row.id).run()
+    queued.push({ client_id: row.client_id, phone: row.phone, message: msg })
+  }
+  return c.json({ processed: due.results.length, queued, note: 'Call /api/twilio/sms to actually send each queued message' })
+})
+
+// ============================================================
+// SCHEDULING / APPOINTMENTS
+// ============================================================
+
+app.get('/api/appointments', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const status = c.req.query('status'); const upcoming = c.req.query('upcoming')
+  let query = `SELECT a.*, c.first_name, c.last_name, c.email, c.phone, s.name as staff_name FROM appointments a LEFT JOIN clients c ON c.id = a.client_id LEFT JOIN staff_users s ON s.id = a.staff_id`
+  const conditions: string[] = []; const params: any[] = []
+  if (status) { conditions.push('a.status = ?'); params.push(status) }
+  if (upcoming === '1' || upcoming === 'true') { conditions.push("a.scheduled_at >= datetime('now')"); conditions.push('a.status = ?'); params.push('scheduled') }
+  if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ')
+  query += ' ORDER BY a.scheduled_at ASC LIMIT 100'
+  const appts = await DB.prepare(query).bind(...params).all()
+  return c.json({ appointments: appts.results, total: appts.results.length })
+})
+
+app.post('/api/appointments', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, lead_id, staff_id, type, scheduled_at, duration_minutes, notes, meeting_link } = await c.req.json() as any
+  if (!scheduled_at) return c.json({ error: 'scheduled_at required (ISO 8601)' }, 400)
+  if (!client_id && !lead_id) return c.json({ error: 'client_id or lead_id required' }, 400)
+  const result = await DB.prepare(`INSERT INTO appointments (client_id, lead_id, staff_id, type, scheduled_at, duration_minutes, notes, meeting_link) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(client_id || null, lead_id || null, staff_id || null, type || 'consultation', scheduled_at, duration_minutes || 30, notes || null, meeting_link || null).run()
+  const apptId = result.meta.last_row_id
+  if (client_id) await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'appointment_scheduled', 'client', ?, ?)`).bind(client_id, `${type || 'consultation'} scheduled for ${scheduled_at}`).run().catch(() => {})
+  return c.json({ success: true, appointment_id: apptId, scheduled_at, type: type || 'consultation', duration_minutes: duration_minutes || 30 }, 201)
+})
+
+app.put('/api/appointments/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { status, notes, meeting_link, scheduled_at } = await c.req.json() as any
+  await DB.prepare(`UPDATE appointments SET status = COALESCE(?, status), notes = COALESCE(?, notes), meeting_link = COALESCE(?, meeting_link), scheduled_at = COALESCE(?, scheduled_at) WHERE id = ?`).bind(status || null, notes || null, meeting_link || null, scheduled_at || null, id).run()
+  return c.json({ success: true })
+})
+
+app.post('/api/appointments/send-reminders', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const due = await DB.prepare(`SELECT a.*, c.first_name, c.phone FROM appointments a LEFT JOIN clients c ON c.id = a.client_id WHERE a.status = 'scheduled' AND a.reminder_sent = 0 AND a.scheduled_at BETWEEN datetime('now') AND datetime('now', '+24 hours')`).all()
+  let sent = 0
+  for (const appt of due.results as any[]) {
+    if (appt.phone) {
+      const msg = `Hi ${appt.first_name || 'there'}, reminder: your ${appt.type?.replace('_',' ')} appointment is tomorrow. ${appt.meeting_link || 'We will call you at your number on file.'} - RJ Business Solutions`
+      await DB.prepare(`INSERT INTO communications (client_id, type, direction, channel, message, status) VALUES (?, 'sms', 'outbound', 'twilio', ?, 'queued')`).bind(appt.client_id, msg).run().catch(() => {})
+    }
+    await DB.prepare(`UPDATE appointments SET reminder_sent = 1 WHERE id = ?`).bind(appt.id).run()
+    sent++
+  }
+  return c.json({ success: true, reminders_sent: sent, total_upcoming: due.results.length })
+})
+
+// ============================================================
+// WEBHOOK MANAGEMENT — Outbound event webhooks
+// ============================================================
+
+const WEBHOOK_EVENTS = ['client.created', 'client.graduated', 'dispute.filed', 'dispute.response', 'payment.received', 'payment.failed', 'lead.created', 'lead.converted', 'round.filed', 'score.updated', 'appointment.scheduled']
+
+app.get('/api/webhooks/configs', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const configs = await DB.prepare(`SELECT id, name, url, events, is_active, last_fired_at, total_fired, fail_count, created_at FROM webhook_configs ORDER BY created_at DESC`).all()
+  return c.json({ configs: configs.results, available_events: WEBHOOK_EVENTS })
+})
+
+app.post('/api/webhooks/configs', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { name, url, events, secret } = await c.req.json() as any
+  if (!name || !url || !events) return c.json({ error: 'name, url, events required' }, 400)
+  if (!url.startsWith('https://')) return c.json({ error: 'URL must use HTTPS' }, 400)
+  const result = await DB.prepare(`INSERT INTO webhook_configs (name, url, events, secret) VALUES (?, ?, ?, ?)`).bind(name, url, JSON.stringify(events), secret || null).run()
+  return c.json({ success: true, config_id: result.meta.last_row_id, name, url, events }, 201)
+})
+
+app.delete('/api/webhooks/configs/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  await DB.prepare(`DELETE FROM webhook_configs WHERE id = ?`).bind(id).run()
+  return c.json({ success: true })
+})
+
+app.post('/api/webhooks/test/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const config = await DB.prepare(`SELECT * FROM webhook_configs WHERE id = ?`).bind(id).first() as any
+  if (!config) return c.json({ error: 'Webhook config not found' }, 404)
+  const payload = { event: 'webhook.test', timestamp: new Date().toISOString(), source: 'RJ Business Solutions', data: { message: 'This is a test webhook from RJ Business Solutions Operations Engine', webhook_id: Number(id) } }
+  try {
+    const res = await fetch(config.url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RJ-Event': 'webhook.test', 'X-RJ-Webhook-ID': String(id), ...(config.secret ? { 'X-RJ-Signature': config.secret } : {}) }, body: JSON.stringify(payload) })
+    await DB.prepare(`UPDATE webhook_configs SET last_fired_at = datetime('now'), total_fired = total_fired + 1 WHERE id = ?`).bind(id).run()
+    return c.json({ success: res.ok, status_code: res.status, response: res.ok ? 'Webhook delivered successfully' : `Delivery failed: HTTP ${res.status}` })
+  } catch (err: any) {
+    await DB.prepare(`UPDATE webhook_configs SET fail_count = fail_count + 1 WHERE id = ?`).bind(id).run()
+    return c.json({ success: false, error: err.message }, 500)
+  }
+})
+
+app.post('/api/webhooks/trigger', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { event, data } = await c.req.json() as any
+  if (!event) return c.json({ error: 'event required' }, 400)
+  const configs = await DB.prepare(`SELECT * FROM webhook_configs WHERE is_active = 1`).all()
+  const payload = { event, timestamp: new Date().toISOString(), source: 'RJ Business Solutions', data: data || {} }
+  let fired = 0; let failed = 0
+  for (const config of configs.results as any[]) {
+    const events = JSON.parse(config.events || '[]')
+    if (!events.includes(event) && !events.includes('*')) continue
+    try {
+      await fetch(config.url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RJ-Event': event, ...(config.secret ? { 'X-RJ-Signature': config.secret } : {}) }, body: JSON.stringify(payload) })
+      await DB.prepare(`UPDATE webhook_configs SET last_fired_at = datetime('now'), total_fired = total_fired + 1 WHERE id = ?`).bind(config.id).run()
+      fired++
+    } catch { await DB.prepare(`UPDATE webhook_configs SET fail_count = fail_count + 1 WHERE id = ?`).bind(config.id).run(); failed++ }
+  }
+  return c.json({ success: true, event, fired, failed, total_configs: configs.results.length })
+})
+
+// ============================================================
+// API KEY MANAGEMENT — For white-label tenant access
+// ============================================================
+
+app.get('/api/api-keys', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const tenantId = c.req.query('tenant_id')
+  const query = tenantId ? `SELECT id, tenant_id, name, key_prefix, permissions, request_count, last_used_at, expires_at, is_active, created_at FROM api_keys WHERE tenant_id = ? ORDER BY created_at DESC` : `SELECT ak.id, ak.tenant_id, t.name as tenant_name, ak.name, ak.key_prefix, ak.permissions, ak.request_count, ak.last_used_at, ak.expires_at, ak.is_active, ak.created_at FROM api_keys ak LEFT JOIN tenants t ON t.id = ak.tenant_id ORDER BY ak.created_at DESC`
+  const keys = tenantId ? await DB.prepare(query).bind(tenantId).all() : await DB.prepare(query).all()
+  return c.json({ api_keys: keys.results, total: keys.results.length })
+})
+
+app.post('/api/api-keys', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { tenant_id, name, permissions, expires_days } = await c.req.json() as any
+  if (!name) return c.json({ error: 'name required' }, 400)
+  const rawKey = 'rjbs_' + crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '').substring(0, 20)
+  const prefix = rawKey.substring(0, 13)
+  const encoder = new TextEncoder(); const data = encoder.encode(rawKey)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+  const keyHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+  const expiresAt = expires_days ? new Date(Date.now() + expires_days * 86400000).toISOString() : null
+  const result = await DB.prepare(`INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix, permissions, expires_at) VALUES (?, ?, ?, ?, ?, ?)`).bind(tenant_id || null, name, keyHash, prefix, JSON.stringify(permissions || ['read']), expiresAt).run()
+  return c.json({ success: true, api_key_id: result.meta.last_row_id, api_key: rawKey, key_prefix: prefix, warning: 'Store this key securely — it will not be shown again', permissions: permissions || ['read'], expires_at: expiresAt }, 201)
+})
+
+app.delete('/api/api-keys/:id', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  await DB.prepare(`UPDATE api_keys SET is_active = 0 WHERE id = ?`).bind(id).run()
+  return c.json({ success: true, message: 'API key revoked' })
+})
+
+// ============================================================
+// IMPORT / EXPORT — CSV data management
+// ============================================================
+
+app.post('/api/import/clients', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const body = await c.req.text()
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean)
+  if (lines.length < 2) return c.json({ error: 'CSV must have header row + at least 1 data row' }, 400)
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[\s"]/g, '_'))
+  const imported: any[] = []; const errors: any[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''))
+    const row: Record<string, string> = {}
+    headers.forEach((h, idx) => { row[h] = values[idx] || '' })
+    const firstName = row.first_name || row.firstname || row.first || ''
+    const lastName = row.last_name || row.lastname || row.last || ''
+    const email = row.email || ''
+    const phone = row.phone || row.phone_number || ''
+    if (!firstName && !email) { errors.push({ row: i, error: 'Missing first_name and email' }); continue }
+    try {
+      const result = await DB.prepare(`INSERT INTO clients (first_name, last_name, email, phone, status, monthly_fee, source, onboarding_date) VALUES (?, ?, ?, ?, 'active', ?, 'import', date('now'))`).bind(firstName, lastName, email, phone, Number(row.monthly_fee || 0)).run()
+      imported.push({ row: i, client_id: result.meta.last_row_id, name: `${firstName} ${lastName}` })
+    } catch (err: any) { errors.push({ row: i, error: err.message }) }
+  }
+  return c.json({ success: true, imported: imported.length, errors: errors.length, clients: imported, import_errors: errors })
+})
+
+app.get('/api/export/clients', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clients = await DB.prepare(`SELECT id, first_name, last_name, email, phone, status, credit_score_start, credit_score_current, credit_score_goal, monthly_fee, onboarding_date, source, assigned_agent, created_at FROM clients ORDER BY id`).all()
+  const headers = 'id,first_name,last_name,email,phone,status,credit_score_start,credit_score_current,credit_score_goal,monthly_fee,onboarding_date,source,assigned_agent,created_at'
+  const rows = clients.results.map((cl: any) => `${cl.id},"${cl.first_name || ''}","${cl.last_name || ''}","${cl.email || ''}","${cl.phone || ''}",${cl.status || ''},${cl.credit_score_start || ''},${cl.credit_score_current || ''},${cl.credit_score_goal || ''},${cl.monthly_fee || 0},"${cl.onboarding_date || ''}","${cl.source || ''}","${cl.assigned_agent || ''}","${cl.created_at || ''}"`)
+  const csv = [headers, ...rows].join('\n')
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="clients-${new Date().toISOString().split('T')[0]}.csv"` } })
+})
+
+app.get('/api/export/disputes', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const disputes = await DB.prepare(`SELECT d.id, c.first_name, c.last_name, d.bureau, d.account_name, d.account_number, d.dispute_reason, d.status, d.result, d.dispute_round, d.sent_date, d.response_due_date, d.created_at, d.updated_at FROM disputes d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.id`).all()
+  const headers = 'id,first_name,last_name,bureau,account_name,account_number,dispute_reason,status,result,dispute_round,sent_date,response_due_date,created_at,updated_at'
+  const rows = disputes.results.map((d: any) => `${d.id},"${d.first_name || ''}","${d.last_name || ''}",${d.bureau || ''},"${(d.account_name || '').replace(/"/g, '""')}","${d.account_number || ''}","${(d.dispute_reason || '').replace(/"/g, '""')}",${d.status || ''},${d.result || ''},${d.dispute_round || 1},"${d.sent_date || ''}","${d.response_due_date || ''}","${d.created_at || ''}","${d.updated_at || ''}"`)
+  const csv = [headers, ...rows].join('\n')
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="disputes-${new Date().toISOString().split('T')[0]}.csv"` } })
+})
+
+app.get('/api/export/report', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  try {
+    const clients = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active, SUM(monthly_fee) as mrr FROM clients`).first() as any
+    const disputes = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN status='deleted' THEN 1 ELSE 0 END) as deleted FROM disputes`).first() as any
+    const revenue = await DB.prepare(`SELECT SUM(plan_price) as mrr FROM client_subscriptions WHERE status='active'`).first() as any
+    const leads = await DB.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN stage='won' THEN 1 ELSE 0 END) as won FROM crm_leads`).first() as any
+    const report = { generated_at: new Date().toISOString(), company: 'RJ Business Solutions', period: new Date().toISOString().split('T')[0], clients: { total: (clients as any)?.total || 0, active: (clients as any)?.active || 0, monthly_revenue: (clients as any)?.mrr || 0 }, disputes: { total: (disputes as any)?.total || 0, deleted: (disputes as any)?.deleted || 0, success_rate: (disputes as any)?.total > 0 ? Math.round(((disputes as any).deleted / (disputes as any).total) * 100) : 0 }, revenue: { mrr: (revenue as any)?.mrr || 0, arr: ((revenue as any)?.mrr || 0) * 12 }, leads: { total: (leads as any)?.total || 0, won: (leads as any)?.won || 0 } }
+    return c.json(report)
+  } catch (err: any) { return c.json({ error: err.message }, 500) }
+})
+
+// ============================================================
+// GOHIGHLEVEL (GHL) INTEGRATION — CRM sync
+// ============================================================
+
+app.get('/api/ghl/status', async (c) => {
+  const hasKey = !!(c.env.OPENROUTER_API_KEY || c.env.GROQ_API_KEY)
+  return c.json({ connected: false, note: 'Add GHL_API_KEY and GHL_LOCATION_ID to enable GoHighLevel sync', required_vars: ['GHL_API_KEY', 'GHL_LOCATION_ID'], features: ['Contact sync', 'Opportunity pipeline', 'Tag management', 'Appointment booking', 'Conversation SMS', 'Automation triggers'], docs: 'https://highlevel.stoplight.io/docs/integrations' })
+})
+
+app.post('/api/ghl/sync-contact', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id } = await c.req.json() as any
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(client_id).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const ghlKey = (c.env as any).GHL_API_KEY; const locationId = (c.env as any).GHL_LOCATION_ID
+  if (!ghlKey || !locationId) {
+    await DB.prepare(`INSERT INTO ghl_sync_log (entity_type, local_id, action, status, error) VALUES ('contact', ?, 'create', 'skipped', 'GHL_API_KEY or GHL_LOCATION_ID not configured')`).bind(client_id).run()
+    return c.json({ success: false, skipped: true, reason: 'GHL_API_KEY and GHL_LOCATION_ID required', client_id, contact_payload: { firstName: client.first_name, lastName: client.last_name, email: client.email, phone: client.phone, tags: [`credit-repair`, `status-${client.status}`, `rj-client`], customField: [{ id: 'credit_score_eq', field_value: String(client.credit_score_eq || '') }, { id: 'monthly_fee', field_value: String(client.monthly_fee || '') }] } })
+  }
+  try {
+    const res = await fetch(`https://services.leadconnectorhq.com/contacts/`, { method: 'POST', headers: { 'Authorization': `Bearer ${ghlKey}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' }, body: JSON.stringify({ firstName: client.first_name, lastName: client.last_name, email: client.email, phone: client.phone, locationId, tags: ['credit-repair', `status-${client.status}`, 'rj-client'] }) })
+    const data = await res.json() as any
+    await DB.prepare(`INSERT INTO ghl_sync_log (entity_type, entity_id, local_id, action, status, response_body) VALUES ('contact', ?, ?, 'create', ?, ?)`).bind(data?.contact?.id || null, client_id, res.ok ? 'success' : 'failed', JSON.stringify(data).substring(0, 500)).run()
+    return c.json({ success: res.ok, ghl_contact_id: data?.contact?.id, client_id })
+  } catch (err: any) {
+    await DB.prepare(`INSERT INTO ghl_sync_log (entity_type, local_id, action, status, error) VALUES ('contact', ?, 'create', 'failed', ?)`).bind(client_id, err.message).run()
+    return c.json({ success: false, error: err.message }, 500)
+  }
+})
+
+app.post('/api/ghl/webhook', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json() as any
+  const { type, contactId, email, phone, firstName, lastName, tags } = body
+  if (DB && (type === 'ContactCreate' || type === 'ContactUpdate')) {
+    const existing = email ? await DB.prepare(`SELECT id FROM crm_leads WHERE email = ?`).bind(email).first() : null
+    if (!existing) {
+      await DB.prepare(`INSERT INTO crm_leads (name, email, phone, source, stage, notes) VALUES (?, ?, ?, 'gohighlevel', 'new', ?)`).bind(`${firstName || ''} ${lastName || ''}`.trim() || 'Unknown', email || null, phone || null, `Imported from GHL. Contact ID: ${contactId}. Tags: ${(tags || []).join(', ')}`).run()
+    }
+  }
+  return c.json({ received: true, type, contactId })
+})
+
+// ============================================================
+// CREDIT MONITORING — Score alerts & change detection
+// ============================================================
+
+app.post('/api/monitoring/check/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { new_score, new_score_start } = await c.req.json() as any
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(clientId).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const alerts: any[] = []
+  const oldScore = client.credit_score_current || client.credit_score_start || 0
+  const newScore = new_score || new_score_start
+  if (newScore && oldScore && Math.abs(newScore - oldScore) >= 5) {
+    const diff = newScore - oldScore
+    const alertType = diff > 0 ? 'score_gain' : 'score_drop'
+    await DB.prepare(`INSERT INTO score_alerts (client_id, alert_type, bureau, old_value, new_value, change_amount, description) VALUES (?, ?, 'all', ?, ?, ?, ?)`).bind(clientId, alertType, oldScore, newScore, diff, `Credit score ${diff > 0 ? 'increased' : 'decreased'} by ${Math.abs(diff)} points (${oldScore} → ${newScore})`).run()
+    alerts.push({ type: alertType, old: oldScore, new: newScore, change: diff })
+    await DB.prepare(`UPDATE clients SET credit_score_current = ?, updated_at = datetime('now') WHERE id = ?`).bind(newScore, clientId).run()
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('monitoring', 'score_check', 'client', ?, ?)`).bind(clientId, `Monitoring check: ${alerts.length} alerts generated`).run().catch(() => {})
+  return c.json({ client_id: clientId, alerts_generated: alerts.length, alerts, scores: { old: oldScore, new: newScore || oldScore } })
+})
+
+app.get('/api/monitoring/alerts', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const unactionedOnly = c.req.query('unactioned') === '1'
+  const query = unactionedOnly
+    ? `SELECT sa.*, c.first_name, c.last_name FROM score_alerts sa JOIN clients c ON c.id = sa.client_id WHERE sa.is_actioned = 0 ORDER BY sa.created_at DESC LIMIT 100`
+    : `SELECT sa.*, c.first_name, c.last_name FROM score_alerts sa JOIN clients c ON c.id = sa.client_id ORDER BY sa.created_at DESC LIMIT 100`
+  const alerts = await DB.prepare(query).all()
+  const summary = await DB.prepare(`SELECT alert_type, COUNT(*) as count FROM score_alerts WHERE created_at >= date('now', '-30 days') GROUP BY alert_type`).all()
+  return c.json({ alerts: alerts.results, total: alerts.results.length, last_30d_summary: summary.results })
+})
+
+app.get('/api/monitoring/alerts/:clientId', async (c) => {
+  const { DB } = c.env; const clientId = c.req.param('clientId')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const alerts = await DB.prepare(`SELECT * FROM score_alerts WHERE client_id = ? ORDER BY created_at DESC LIMIT 50`).bind(clientId).all()
+  const gains = alerts.results.filter((a: any) => a.alert_type === 'score_gain').length
+  const drops = alerts.results.filter((a: any) => a.alert_type === 'score_drop').length
+  const totalChange = (alerts.results as any[]).reduce((sum, a) => sum + (a.change_amount || 0), 0)
+  return c.json({ alerts: alerts.results, total: alerts.results.length, summary: { gains, drops, total_point_change: totalChange } })
+})
+
+app.put('/api/monitoring/alerts/:id/action', async (c) => {
+  const { DB } = c.env; const id = c.req.param('id')
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  await DB.prepare(`UPDATE score_alerts SET is_actioned = 1, actioned_at = datetime('now') WHERE id = ?`).bind(id).run()
+  return c.json({ success: true })
+})
+
 export default app
+
