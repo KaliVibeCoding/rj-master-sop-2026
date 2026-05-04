@@ -14,9 +14,9 @@ A full-stack credit repair business operations platform + complete SaaS infrastr
 - **Styling**: Tailwind CSS (CDN in dev)
 
 ## Stats
-- **156 route handlers** across 25 feature groups
-- **4,548 lines** of TypeScript in `src/index.tsx`
-- **28 database tables** across 4 migrations
+- **173 route handlers** across 26 feature groups
+- **5,162 lines** of TypeScript in `src/index.tsx`
+- **31 database tables** across 5 migrations
 - **90 environment variables** across 12 categories
 - **62 SOPs** across 7 phases
 - **239+ templates** in `src/templates.ts`
@@ -39,6 +39,8 @@ migrations/
                                   sequence_enrollments, crm_leads, staff_users, dispute_rounds,
                                   sms_sequences, sms_enrollments, appointments, webhook_configs,
                                   api_keys, score_alerts, ghl_sync_log)
+  0005_mfsn_full.sql           — 3 MFSN analysis tables (mfsn_tokens, credit_report_inquiries,
+                                  credit_report_public_records)
 public/
   static/style.css  — Global styles
 wrangler.jsonc   — Cloudflare Pages + D1 config
@@ -138,17 +140,45 @@ result, tracking_number, notes, created_at, updated_at
 - `POST /api/portal/generate` — Generate portal token for client
 - `GET /api/portal/data/:token` — Portal JSON data
 
-### MFSN Credit Reports (9)
+### MFSN Credit Reports + Full Analysis (27)
+**Core Pull**
 - `POST /api/mfsn/login` — MFSN auth
-- `POST /api/mfsn/fetch-3b` — Pull 3-bureau report → store in D1
+- `POST /api/mfsn/fetch-3b` — Pull 3-bureau report → store in D1 (accounts, inquiries, public records all parsed)
 - `GET /api/mfsn/reports/:clientId` — Report history
 - `GET /api/mfsn/score-history/:clientId` — Score tracking
-- `GET /api/mfsn/reports/:reportId/accounts` — Tradelines
-- `GET /api/mfsn/docs` — Full API docs
+- `GET /api/mfsn/reports/:reportId/accounts` — All tradelines for a report
+- `GET /api/mfsn/docs` — API docs
 - `GET /api/mfsn/content` — Integration notes
 - `GET /api/mfsn/schemas` — 42 OpenAPI schemas
 - `GET /api/mfsn/html-files` — 106 HTML doc files
 - `GET /api/mfsn/endpoints` — Endpoint definitions
+
+**Token Management**
+- `POST /api/mfsn/tokens` — Save MFSN member token for a client (enables auto-refresh)
+- `GET /api/mfsn/tokens/:clientId` — Get stored token status
+
+**Report Analysis**
+- `GET /api/mfsn/reports/:reportId/full` — Full parsed report (scores + accounts + inquiries + public records + score factors)
+- `GET /api/mfsn/reports/:reportId/negatives` — Negative accounts prioritized for dispute (with severity + score impact estimate)
+- `GET /api/mfsn/reports/:reportId/inquiries` — Hard inquiries with age annotation
+- `GET /api/mfsn/reports/:reportId/public-records` — Bankruptcies, liens, judgments with dispute approach
+- `GET /api/mfsn/reports/:reportId/score-factors` — Score factor codes by bureau
+- `POST /api/mfsn/reports/:reportId/auto-dispute` — Auto-create dispute records for all negative accounts
+- `GET /api/mfsn/compare?report1_id=&report2_id=` — Compare two reports side-by-side (score diff, negative diff)
+
+**Client Intelligence**
+- `GET /api/mfsn/clients/:clientId/latest` — Latest report summary + score progress
+- `GET /api/mfsn/clients/:clientId/score-trend` — Score history chart data (labels, EFX/TU/EXP arrays)
+- `GET /api/mfsn/clients/:clientId/dispute-candidates` — Undisputed negatives from latest report, prioritized
+- `GET /api/mfsn/clients/:clientId/summary` — Full credit profile (scores, reports, disputes, MFSN status)
+- `GET /api/mfsn/clients/:clientId/all-accounts` — All accounts across all reports, deduplicated
+- `POST /api/mfsn/clients/:clientId/refresh` — Re-pull 3B using stored token, update D1 + score history
+
+**Member Enrollment**
+- `POST /api/mfsn/enroll` — Enroll new MFSN member (pass-through to MFSN API, stores token on success)
+
+**HTML Report Viewer**
+- `GET /mfsn/report/:reportId` — Full 3-bureau report rendered as a styled HTML page (scores, accounts, inquiries, public records, score factors, print/PDF ready)
 
 ### Email Engine (5)
 - `POST /api/email/sendgrid` — Send via SendGrid

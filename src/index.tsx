@@ -2417,15 +2417,30 @@ app.post('/api/mfsn/fetch-3b', async (c) => {
         await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'credit_report_pulled', 'credit_report', ?, ?)`)
           .bind(reportId, `3B report for client ${client_id}: EFX=${scoreEfx} TU=${scoreTu} EXP=${scoreExp}`).run()
 
-        // Parse and store individual accounts
+        // Parse and store individual accounts, inquiries, public records
         for (const view of providerViews) {
-          const accounts = view.accounts || []
           const provider = view.provider || view.summary?.provider || 'UNKNOWN'
-          for (const acct of accounts) {
-            await DB.prepare(`INSERT INTO credit_report_accounts (credit_report_id, client_id, provider, account_name, account_number, account_status, account_open, loan_type, balance_amount, credit_limit_amount, high_credit_amount, monthly_payment, past_due_amount, charge_off_amount, payment_status, raw_account_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-              .bind(reportId, client_id, provider, acct.accountName || '', acct.accountNumber || '', acct.accountStatus || '', acct.accountOpen ? 1 : 0, acct.loanType?.description || '', acct.balanceAmount?.value || 0, acct.creditLimitAmount?.value || 0, acct.highCreditAmount?.value || 0, acct.monthlyPayment?.value || 0, acct.pastDueAmount?.value || 0, acct.chargeOffAmount?.value || 0, acct.paymentStatus || '', JSON.stringify(acct)).run()
+          // Accounts (full field set)
+          for (const acct of (view.accounts || [])) {
+            await DB.prepare(`INSERT INTO credit_report_accounts (credit_report_id, client_id, provider, account_name, account_number, account_status, account_open, account_type, loan_type, date_opened, date_reported, date_closed, balance_amount, credit_limit_amount, high_credit_amount, monthly_payment, past_due_amount, charge_off_amount, payment_status, worst_payment_status, times_30_days_late, times_60_days_late, times_90_days_late, creditor_phone, creditor_address, raw_account_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              .bind(reportId, client_id, provider, acct.accountName || '', acct.accountNumber || '', acct.accountStatus || '', acct.accountOpen ? 1 : 0, acct.accountType || '', acct.loanType?.description || '', acct.dateOpened || acct.openDate || '', acct.dateReported || acct.lastUpdated || '', acct.dateClosed || acct.closedDate || '', acct.balanceAmount?.value || 0, acct.creditLimitAmount?.value || 0, acct.highCreditAmount?.value || 0, acct.monthlyPayment?.value || 0, acct.pastDueAmount?.value || 0, acct.chargeOffAmount?.value || 0, acct.paymentStatus || '', acct.worstPaymentStatus || acct.paymentStatus || '', acct.times30DaysLate || acct.late30 || 0, acct.times60DaysLate || acct.late60 || 0, acct.times90DaysLate || acct.late90 || 0, acct.creditorPhone || '', acct.creditorAddress || '', JSON.stringify(acct)).run()
+          }
+          // Hard inquiries
+          for (const inq of (view.inquiries || [])) {
+            await DB.prepare(`INSERT INTO credit_report_inquiries (credit_report_id, client_id, provider, inquirer_name, inquiry_date, inquiry_type, inquiry_purpose, industry_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+              .bind(reportId, client_id, provider, inq.inquirerName || inq.name || '', inq.date || inq.inquiryDate || '', inq.type === 'soft' ? 'soft' : 'hard', inq.purpose || inq.inquiryPurpose || '', inq.industryCode || '').run()
+          }
+          // Public records (bankruptcies, liens, judgments)
+          for (const pr of (view.publicRecords || [])) {
+            await DB.prepare(`INSERT INTO credit_report_public_records (credit_report_id, client_id, provider, record_type, court_name, filing_date, status, satisfied_date, amount, reference_number, plaintiff, attorney, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              .bind(reportId, client_id, provider, pr.recordType || pr.type || '', pr.courtName || '', pr.filingDate || pr.date || '', pr.status || '', pr.satisfiedDate || pr.dischargeDate || '', pr.amount?.value || pr.amount || 0, pr.referenceNumber || pr.caseNumber || '', pr.plaintiff || pr.creditorName || '', pr.attorney || '', JSON.stringify(pr)).run()
           }
         }
+        // Store MFSN token for this client so future refreshes don't need re-entry
+        try {
+          await DB.prepare(`INSERT INTO mfsn_tokens (client_id, mfsn_email, mfsn_token, last_pull_date, total_pulls) VALUES (?, ?, ?, datetime('now'), 1) ON CONFLICT(client_id) DO UPDATE SET mfsn_email=excluded.mfsn_email, mfsn_token=excluded.mfsn_token, last_pull_date=datetime('now'), total_pulls=total_pulls+1, updated_at=datetime('now')`)
+            .bind(client_id, client_email, client_token).run()
+        } catch (_) {}
       } catch (dbErr: any) {
         console.error('D1 storage error:', dbErr.message)
       }
@@ -2463,6 +2478,605 @@ app.get('/api/mfsn/reports/:reportId/accounts', async (c) => {
   const { DB } = c.env; const reportId = c.req.param('reportId')
   const accounts = await DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? ORDER BY provider, account_name').bind(reportId).all()
   return c.json({ accounts: accounts.results })
+})
+
+// ============================================================
+// MFSN — FULL ANALYSIS LAYER (15 new endpoints)
+// ============================================================
+
+// Save MFSN token for a client (for future auto-refresh)
+app.post('/api/mfsn/tokens', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const { client_id, mfsn_email, mfsn_token } = await c.req.json() as any
+  if (!client_id || !mfsn_email || !mfsn_token) return c.json({ error: 'client_id, mfsn_email, mfsn_token required' }, 400)
+  await DB.prepare(`INSERT INTO mfsn_tokens (client_id, mfsn_email, mfsn_token) VALUES (?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET mfsn_email=excluded.mfsn_email, mfsn_token=excluded.mfsn_token, updated_at=datetime('now')`)
+    .bind(client_id, mfsn_email, mfsn_token).run()
+  return c.json({ success: true, message: 'MFSN token saved for client ' + client_id })
+})
+
+// Get stored MFSN token for a client
+app.get('/api/mfsn/tokens/:clientId', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const token = await DB.prepare('SELECT client_id, mfsn_email, last_pull_date, total_pulls, created_at, updated_at FROM mfsn_tokens WHERE client_id = ?')
+    .bind(c.req.param('clientId')).first()
+  if (!token) return c.json({ error: 'No MFSN token stored for this client' }, 404)
+  return c.json({ success: true, token })
+})
+
+// Re-pull a fresh 3B report for a client using stored token (auto-refresh)
+app.post('/api/mfsn/clients/:clientId/refresh', async (c) => {
+  const { DB, env } = c
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const stored = await DB.prepare('SELECT mfsn_email, mfsn_token FROM mfsn_tokens WHERE client_id = ?').bind(clientId).first() as any
+  if (!stored) return c.json({ error: 'No stored MFSN token for client. Save one via POST /api/mfsn/tokens first.' }, 404)
+  const apiUrl = env.MFSN_API_URL || 'https://api.myfreescorenow.com'
+  try {
+    const loginForm = new FormData(); loginForm.append('email', env.MFSN_API_EMAIL); loginForm.append('password', env.MFSN_API_PASSWORD)
+    const loginRes = await fetch(`${apiUrl}/api/auth/login`, { method: 'POST', body: loginForm })
+    const loginData = await loginRes.json() as any
+    if (!loginData.success) return c.json({ error: 'MFSN auth failed: ' + loginData.message }, 401)
+    const fetchForm = new FormData(); fetchForm.append('email', stored.mfsn_email); fetchForm.append('client_token', stored.mfsn_token)
+    const fetchRes = await fetch(`${apiUrl}/api/auth/fetch-3B-json`, { method: 'POST', body: fetchForm })
+    const reportData = await fetchRes.json() as any
+    if (!reportData.success) return c.json({ error: 'Report refresh failed: ' + reportData.message }, 400)
+    const providerViews = reportData.data?.providerViews || []
+    let scoreEfx: number | null = null, scoreTu: number | null = null, scoreExp: number | null = null
+    let totalAccounts = 0, totalNegativeAccounts = 0, totalInquiries = 0, totalPublicRecords = 0, totalCollections = 0, totalOpenAccounts = 0
+    let creditHistoryMonths = 0, avgAccountAge = 0, oldestDate = '', oldestName = '', newestDate = '', newestName = ''
+    let efxId = '', tuId = '', expId = ''
+    for (const view of providerViews) {
+      const provider = view.provider || view.summary?.provider
+      const summary = view.summary || {}
+      const score = summary.creditScore?.score
+      if (provider === 'EFX') { scoreEfx = score; efxId = summary.id || '' }
+      if (provider === 'TU') { scoreTu = score; tuId = summary.id || '' }
+      if (provider === 'EXP') { scoreExp = score; expId = summary.id || '' }
+      totalAccounts += summary.totalOpenAccounts?.count || 0
+      totalInquiries += summary.totalInquires || 0
+      totalPublicRecords += summary.totalPublicRecords || 0
+      totalCollections += summary.totalCollections || 0
+      totalNegativeAccounts += summary.totalNegativeAccounts || 0
+      if (summary.lengthOfCreditHistoryMonths > creditHistoryMonths) creditHistoryMonths = summary.lengthOfCreditHistoryMonths || 0
+      if (summary.averageAccountAgeMonths > avgAccountAge) avgAccountAge = summary.averageAccountAgeMonths || 0
+      if (summary.oldestAccountOpenDate) { oldestDate = summary.oldestAccountOpenDate; oldestName = summary.oldestAccountName || '' }
+      if (summary.mostRecentAccountOpenDate) { newestDate = summary.mostRecentAccountOpenDate; newestName = summary.mostRecentAccountName || '' }
+    }
+    const r = await DB.prepare(`INSERT INTO credit_reports (client_id, mfsn_member_email, report_type, score_efx, score_tu, score_exp, efx_report_id, tu_report_id, exp_report_id, total_accounts, total_open_accounts, total_negative_accounts, total_inquiries, total_public_records, total_collections, credit_history_months, avg_account_age_months, oldest_account_date, oldest_account_name, newest_account_date, newest_account_name, raw_response_json, pulled_by, status) VALUES (?, ?, 'US_3B', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'system-refresh', 'active')`)
+      .bind(clientId, stored.mfsn_email, scoreEfx, scoreTu, scoreExp, efxId, tuId, expId, totalAccounts, totalOpenAccounts, totalNegativeAccounts, totalInquiries, totalPublicRecords, totalCollections, creditHistoryMonths, avgAccountAge, oldestDate, oldestName, newestDate, newestName, JSON.stringify(reportData.data)).run()
+    const reportId = r.meta.last_row_id
+    const avgScore = [scoreEfx, scoreTu, scoreExp].filter(s => s !== null)
+    const scoreAvg = avgScore.length > 0 ? Math.round(avgScore.reduce((a, b) => (a as number) + (b as number), 0) as number / avgScore.length) : null
+    await DB.prepare(`INSERT INTO credit_score_history (client_id, credit_report_id, score_efx, score_tu, score_exp, score_avg, source) VALUES (?, ?, ?, ?, ?, ?, 'mfsn')`).bind(clientId, reportId, scoreEfx, scoreTu, scoreExp, scoreAvg).run()
+    if (scoreAvg) await DB.prepare(`UPDATE clients SET credit_score_current = ?, updated_at = datetime('now') WHERE id = ?`).bind(scoreAvg, clientId).run()
+    await DB.prepare(`UPDATE mfsn_tokens SET last_pull_date=datetime('now'), total_pulls=total_pulls+1, updated_at=datetime('now') WHERE client_id=?`).bind(clientId).run()
+    for (const view of providerViews) {
+      const provider = view.provider || view.summary?.provider || 'UNKNOWN'
+      for (const acct of (view.accounts || [])) {
+        await DB.prepare(`INSERT INTO credit_report_accounts (credit_report_id, client_id, provider, account_name, account_number, account_status, account_open, account_type, loan_type, date_opened, date_reported, balance_amount, credit_limit_amount, past_due_amount, charge_off_amount, payment_status, raw_account_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(reportId, clientId, provider, acct.accountName || '', acct.accountNumber || '', acct.accountStatus || '', acct.accountOpen ? 1 : 0, acct.accountType || '', acct.loanType?.description || '', acct.dateOpened || '', acct.dateReported || '', acct.balanceAmount?.value || 0, acct.creditLimitAmount?.value || 0, acct.pastDueAmount?.value || 0, acct.chargeOffAmount?.value || 0, acct.paymentStatus || '', JSON.stringify(acct)).run()
+      }
+      for (const inq of (view.inquiries || [])) {
+        await DB.prepare(`INSERT INTO credit_report_inquiries (credit_report_id, client_id, provider, inquirer_name, inquiry_date, inquiry_type) VALUES (?, ?, ?, ?, ?, 'hard')`).bind(reportId, clientId, provider, inq.inquirerName || inq.name || '', inq.date || inq.inquiryDate || '').run()
+      }
+    }
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'credit_report_refreshed', 'credit_report', ?, ?)`).bind(reportId, `Auto-refresh for client ${clientId}: EFX=${scoreEfx} TU=${scoreTu} EXP=${scoreExp}`).run()
+    return c.json({ success: true, report_id: reportId, scores: { efx: scoreEfx, tu: scoreTu, exp: scoreExp }, score_avg: scoreAvg, previous_pull: stored.last_pull_date })
+  } catch (err: any) {
+    return c.json({ error: 'Refresh failed: ' + (err.message || 'Unknown error') }, 500)
+  }
+})
+
+// Full parsed report (all sections: scores, accounts, inquiries, public records, score factors)
+app.get('/api/mfsn/reports/:reportId/full', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const [report, accounts, inquiries, pubRecords] = await Promise.all([
+    DB.prepare('SELECT * FROM credit_reports WHERE id = ?').bind(reportId).first(),
+    DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? ORDER BY provider, account_name').bind(reportId).all(),
+    DB.prepare('SELECT * FROM credit_report_inquiries WHERE credit_report_id = ? ORDER BY provider, inquiry_date DESC').bind(reportId).all(),
+    DB.prepare('SELECT * FROM credit_report_public_records WHERE credit_report_id = ? ORDER BY provider, filing_date DESC').bind(reportId).all()
+  ])
+  if (!report) return c.json({ error: 'Report not found' }, 404)
+  const rpt = report as any
+  const scoreFactors: any = {}
+  if (rpt.raw_response_json) {
+    try {
+      const raw = JSON.parse(rpt.raw_response_json)
+      for (const view of (raw?.providerViews || [])) {
+        const p = view.provider || view.summary?.provider
+        if (p) scoreFactors[p] = view.summary?.creditScore?.scoreFactors || []
+      }
+    } catch (_) {}
+  }
+  return c.json({
+    report,
+    score_factors: scoreFactors,
+    accounts: { total: accounts.results.length, by_bureau: { EFX: accounts.results.filter((a: any) => a.provider === 'EFX'), TU: accounts.results.filter((a: any) => a.provider === 'TU'), EXP: accounts.results.filter((a: any) => a.provider === 'EXP') } },
+    inquiries: { total: inquiries.results.length, by_bureau: { EFX: inquiries.results.filter((i: any) => i.provider === 'EFX'), TU: inquiries.results.filter((i: any) => i.provider === 'TU'), EXP: inquiries.results.filter((i: any) => i.provider === 'EXP') } },
+    public_records: { total: pubRecords.results.length, items: pubRecords.results }
+  })
+})
+
+// Negative accounts from a report — prioritized for dispute
+app.get('/api/mfsn/reports/:reportId/negatives', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const negativeStatuses = ['30', '60', '90', '120', '150', '180', 'collection', 'charge_off', 'chargeoff', 'charged off', 'late', 'delinquent', 'derogatory', 'negative', 'delinq', 'collection account', 'charge-off', 'CO']
+  const accounts = await DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? ORDER BY provider, past_due_amount DESC, charge_off_amount DESC').bind(reportId).all()
+  const negatives = (accounts.results as any[]).filter(a => {
+    const ps = (a.payment_status || '').toLowerCase()
+    const ws = (a.worst_payment_status || '').toLowerCase()
+    return negativeStatuses.some(s => ps.includes(s.toLowerCase()) || ws.includes(s.toLowerCase())) || a.past_due_amount > 0 || a.charge_off_amount > 0 || a.times_30_days_late > 0 || a.times_60_days_late > 0 || a.times_90_days_late > 0
+  })
+  // Score impact estimate
+  const scored = negatives.map((a: any) => ({
+    ...a,
+    dispute_priority: a.charge_off_amount > 0 ? 'critical' : a.past_due_amount > 500 ? 'high' : a.times_90_days_late > 0 ? 'high' : 'medium',
+    estimated_score_impact: a.charge_off_amount > 0 ? '40-80 pts' : a.past_due_amount > 0 ? '20-50 pts' : '10-30 pts',
+    recommended_dispute_reason: a.charge_off_amount > 0 ? 'Account inaccurate — charge-off amount disputed' : a.past_due_amount > 0 ? 'Account inaccurate — payment history disputed' : 'Account information not verified — request method of verification'
+  }))
+  return c.json({ report_id: reportId, total_negatives: negatives.length, negatives: scored, bureaus_affected: [...new Set(negatives.map((a: any) => a.provider))] })
+})
+
+// Hard inquiries from a report
+app.get('/api/mfsn/reports/:reportId/inquiries', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const inquiries = await DB.prepare('SELECT * FROM credit_report_inquiries WHERE credit_report_id = ? ORDER BY provider, inquiry_date DESC').bind(reportId).all()
+  const inqs = inquiries.results as any[]
+  // Flag inquiries older than 2 years (no longer affect score but still on report)
+  const twoYearsAgo = new Date(); twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2)
+  const annotated = inqs.map(i => ({
+    ...i,
+    disputable: !i.inquiry_date || new Date(i.inquiry_date) > twoYearsAgo,
+    note: i.inquiry_date && new Date(i.inquiry_date) < twoYearsAgo ? 'Older than 2 years — no score impact, but disputable if unauthorized' : 'Within 2 years — actively reducing score'
+  }))
+  return c.json({ report_id: reportId, total: inqs.length, by_bureau: { EFX: annotated.filter(i => i.provider === 'EFX'), TU: annotated.filter(i => i.provider === 'TU'), EXP: annotated.filter(i => i.provider === 'EXP') }, inquiries: annotated })
+})
+
+// Public records from a report
+app.get('/api/mfsn/reports/:reportId/public-records', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const records = await DB.prepare('SELECT * FROM credit_report_public_records WHERE credit_report_id = ? ORDER BY provider, filing_date DESC').bind(reportId).all()
+  const recs = records.results as any[]
+  const annotated = recs.map(r => ({
+    ...r,
+    severity: r.record_type?.toLowerCase().includes('bankrupt') ? 'critical' : 'high',
+    reporting_limit: r.record_type?.toLowerCase().includes('bankrupt') ? '7-10 years from filing' : '7 years from filing',
+    dispute_approach: 'Verify accuracy — check filing date, court, amounts, and status. If any field inaccurate, dispute under FCRA §611'
+  }))
+  return c.json({ report_id: reportId, total: recs.length, public_records: annotated })
+})
+
+// Score factors by bureau from stored raw JSON
+app.get('/api/mfsn/reports/:reportId/score-factors', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const report = await DB.prepare('SELECT score_efx, score_tu, score_exp, raw_response_json FROM credit_reports WHERE id = ?').bind(reportId).first() as any
+  if (!report) return c.json({ error: 'Report not found' }, 404)
+  const factors: any = { EFX: [], TU: [], EXP: [] }
+  if (report.raw_response_json) {
+    try {
+      const raw = JSON.parse(report.raw_response_json)
+      for (const view of (raw?.providerViews || [])) {
+        const p = view.provider || view.summary?.provider
+        if (p && factors[p] !== undefined) factors[p] = view.summary?.creditScore?.scoreFactors || []
+      }
+    } catch (_) {}
+  }
+  return c.json({
+    report_id: reportId,
+    scores: { EFX: report.score_efx, TU: report.score_tu, EXP: report.score_exp },
+    score_factors: factors,
+    total_factors: Object.values(factors).flat().length
+  })
+})
+
+// Auto-generate disputes from a report's negative accounts
+app.post('/api/mfsn/reports/:reportId/auto-dispute', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const reportId = c.req.param('reportId')
+  const body = await c.req.json().catch(() => ({})) as any
+  const bureauFilter = body.bureau || null
+  const report = await DB.prepare('SELECT client_id FROM credit_reports WHERE id = ?').bind(reportId).first() as any
+  if (!report) return c.json({ error: 'Report not found' }, 404)
+  const clientId = report.client_id
+  const negativeStatuses = ['late', 'delinquent', 'collection', 'charge', 'derogatory', 'negative', '30', '60', '90']
+  let query = 'SELECT * FROM credit_report_accounts WHERE credit_report_id = ? AND is_disputed = 0'
+  const params: any[] = [reportId]
+  if (bureauFilter) { query += ' AND provider = ?'; params.push(bureauFilter.toUpperCase()) }
+  const accounts = await DB.prepare(query).bind(...params).all()
+  const negatives = (accounts.results as any[]).filter(a => {
+    const ps = (a.payment_status || '').toLowerCase()
+    return negativeStatuses.some(s => ps.includes(s)) || a.past_due_amount > 0 || a.charge_off_amount > 0 || a.times_30_days_late > 0
+  })
+  const bureauMap: any = { EFX: 'equifax', TU: 'transunion', EXP: 'experian', UNKNOWN: 'equifax' }
+  const created: any[] = []
+  for (const acct of negatives) {
+    const reason = acct.charge_off_amount > 0
+      ? 'Account reported as charged-off — requesting verification of all account information including dates, amounts, and creditor details under FCRA §611'
+      : acct.past_due_amount > 0
+      ? 'Payment history inaccurate — requesting method of verification for all late payment notations under FCRA §609'
+      : 'Negative account notation — requesting complete account verification under FCRA §611'
+    const r = await DB.prepare(`INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, status, dispute_round, fcra_section, letter_template, response_due_date) VALUES (?, ?, ?, ?, ?, 'pending', 1, 'FCRA §611', 'R1_Standard', date('now', '+35 days'))`)
+      .bind(clientId, bureauMap[acct.provider] || 'equifax', acct.account_name, acct.account_number, reason).run()
+    await DB.prepare('UPDATE credit_report_accounts SET is_disputed = 1, dispute_id = ? WHERE id = ?').bind(r.meta.last_row_id, acct.id).run()
+    created.push({ dispute_id: r.meta.last_row_id, bureau: bureauMap[acct.provider], account: acct.account_name })
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'auto_disputes_created', 'credit_report', ?, ?)`).bind(reportId, `Auto-created ${created.length} disputes from report for client ${clientId}`).run()
+  return c.json({ success: true, disputes_created: created.length, report_id: reportId, client_id: clientId, disputes: created })
+})
+
+// Latest report summary for a client
+app.get('/api/mfsn/clients/:clientId/latest', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const report = await DB.prepare('SELECT * FROM credit_reports WHERE client_id = ? ORDER BY pull_date DESC LIMIT 1').bind(clientId).first() as any
+  if (!report) return c.json({ error: 'No reports found for client' }, 404)
+  const [client, accounts, history, inquiries, pubRecords] = await Promise.all([
+    DB.prepare('SELECT first_name, last_name, credit_score_start, credit_score_current, credit_score_goal FROM clients WHERE id = ?').bind(clientId).first(),
+    DB.prepare('SELECT provider, COUNT(*) as total, SUM(CASE WHEN is_disputed=1 THEN 1 ELSE 0 END) as disputed, SUM(past_due_amount) as total_past_due FROM credit_report_accounts WHERE credit_report_id = ? GROUP BY provider').bind(report.id).all(),
+    DB.prepare('SELECT score_efx, score_tu, score_exp, score_avg, recorded_date FROM credit_score_history WHERE client_id = ? ORDER BY recorded_date DESC LIMIT 6').bind(clientId).all(),
+    DB.prepare('SELECT COUNT(*) as total FROM credit_report_inquiries WHERE credit_report_id = ?').bind(report.id).first(),
+    DB.prepare('SELECT COUNT(*) as total FROM credit_report_public_records WHERE credit_report_id = ?').bind(report.id).first()
+  ])
+  const cl = client as any
+  const scoreStart = cl?.credit_score_start
+  const scoreCurrent = report.score_efx || report.score_tu || report.score_exp
+  return c.json({
+    client: cl,
+    latest_report: { id: report.id, pull_date: report.pull_date, scores: { EFX: report.score_efx, TU: report.score_tu, EXP: report.score_exp }, total_accounts: report.total_accounts, total_negative: report.total_negative_accounts, total_inquiries: (inquiries as any)?.total || 0, total_public_records: (pubRecords as any)?.total || 0 },
+    score_progress: { start: scoreStart, current: scoreCurrent, goal: cl?.credit_score_goal, gain: scoreCurrent && scoreStart ? scoreCurrent - scoreStart : null },
+    by_bureau: accounts.results,
+    score_history: history.results
+  })
+})
+
+// Score trend chart data for a client
+app.get('/api/mfsn/clients/:clientId/score-trend', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const history = await DB.prepare('SELECT score_efx, score_tu, score_exp, score_avg, recorded_date, source FROM credit_score_history WHERE client_id = ? ORDER BY recorded_date ASC').bind(clientId).all()
+  const client = await DB.prepare('SELECT first_name, last_name, credit_score_start, credit_score_current, credit_score_goal FROM clients WHERE id = ?').bind(clientId).first() as any
+  const h = history.results as any[]
+  const first = h[0]; const last = h[h.length - 1]
+  const totalGain = first && last ? (last.score_avg || 0) - (first.score_avg || 0) : 0
+  return c.json({
+    client: { id: clientId, name: client ? `${client.first_name} ${client.last_name}` : '', goal: client?.credit_score_goal },
+    trend: h,
+    summary: { total_pulls: h.length, total_gain: totalGain, first_pull: first?.recorded_date, latest_pull: last?.recorded_date, avg_gain_per_pull: h.length > 1 ? Math.round(totalGain / (h.length - 1)) : 0 },
+    chart_data: { labels: h.map(e => e.recorded_date?.split('T')[0] || e.recorded_date), efx: h.map(e => e.score_efx), tu: h.map(e => e.score_tu), exp: h.map(e => e.score_exp), avg: h.map(e => e.score_avg) }
+  })
+})
+
+// Dispute candidates — all undisputed negatives from latest report
+app.get('/api/mfsn/clients/:clientId/dispute-candidates', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const report = await DB.prepare('SELECT id FROM credit_reports WHERE client_id = ? ORDER BY pull_date DESC LIMIT 1').bind(clientId).first() as any
+  if (!report) return c.json({ error: 'No reports found — pull a report first' }, 404)
+  const accounts = await DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? AND is_disputed = 0 ORDER BY charge_off_amount DESC, past_due_amount DESC').bind(report.id).all()
+  const negativeStatuses = ['late', 'delinquent', 'collection', 'charge', 'derogatory', 'negative', '30', '60', '90']
+  const candidates = (accounts.results as any[])
+    .filter(a => negativeStatuses.some(s => (a.payment_status || '').toLowerCase().includes(s)) || a.past_due_amount > 0 || a.charge_off_amount > 0 || a.times_30_days_late > 0)
+    .map(a => ({
+      account_id: a.id,
+      bureau: a.provider,
+      account_name: a.account_name,
+      account_number: a.account_number,
+      payment_status: a.payment_status,
+      balance: a.balance_amount,
+      past_due: a.past_due_amount,
+      charge_off: a.charge_off_amount,
+      priority: a.charge_off_amount > 0 ? 1 : a.past_due_amount > 500 ? 2 : 3,
+      priority_label: a.charge_off_amount > 0 ? 'critical' : a.past_due_amount > 500 ? 'high' : 'medium',
+      suggested_reason: a.charge_off_amount > 0 ? 'Charge-off amount and dates inaccurate — full verification required' : 'Late payment notation — request method of verification'
+    }))
+    .sort((a, b) => a.priority - b.priority)
+  return c.json({ client_id: clientId, report_id: report.id, total_candidates: candidates.length, candidates })
+})
+
+// Full credit profile summary for a client
+app.get('/api/mfsn/clients/:clientId/summary', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const [client, totalReports, latestReport, disputes, scoreHistory, token] = await Promise.all([
+    DB.prepare('SELECT * FROM clients WHERE id = ?').bind(clientId).first(),
+    DB.prepare('SELECT COUNT(*) as total FROM credit_reports WHERE client_id = ?').bind(clientId).first(),
+    DB.prepare('SELECT id, pull_date, score_efx, score_tu, score_exp, total_negative_accounts, total_inquiries FROM credit_reports WHERE client_id = ? ORDER BY pull_date DESC LIMIT 1').bind(clientId).first(),
+    DB.prepare('SELECT status, COUNT(*) as count FROM disputes WHERE client_id = ? GROUP BY status').bind(clientId).all(),
+    DB.prepare('SELECT score_avg, recorded_date FROM credit_score_history WHERE client_id = ? ORDER BY recorded_date ASC').bind(clientId).all(),
+    DB.prepare('SELECT mfsn_email, last_pull_date, total_pulls FROM mfsn_tokens WHERE client_id = ?').bind(clientId).first()
+  ])
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const cl = client as any; const lr = latestReport as any
+  const sh = scoreHistory.results as any[]
+  const firstScore = sh[0]?.score_avg; const latestScore = sh[sh.length - 1]?.score_avg
+  const disputeStats: any = {}; (disputes.results as any[]).forEach(d => disputeStats[d.status] = d.count)
+  return c.json({
+    client: { id: cl.id, name: `${cl.first_name} ${cl.last_name}`, email: cl.email, status: cl.status, goal: cl.credit_score_goal, monthly_fee: cl.monthly_fee },
+    scores: { start: cl.credit_score_start, current: cl.credit_score_current, goal: cl.credit_score_goal, gain: cl.credit_score_current && cl.credit_score_start ? cl.credit_score_current - cl.credit_score_start : null, goal_remaining: cl.credit_score_goal && cl.credit_score_current ? cl.credit_score_goal - cl.credit_score_current : null },
+    reports: { total: (totalReports as any)?.total || 0, latest: lr ? { id: lr.id, date: lr.pull_date, efx: lr.score_efx, tu: lr.score_tu, exp: lr.score_exp, negatives: lr.total_negative_accounts } : null },
+    disputes: { ...disputeStats, total: Object.values(disputeStats).reduce((a: any, b: any) => a + b, 0) },
+    mfsn: { connected: !!token, email: (token as any)?.mfsn_email, last_pull: (token as any)?.last_pull_date, total_pulls: (token as any)?.total_pulls || 0 },
+    score_trend: { data_points: sh.length, total_gain: firstScore && latestScore ? latestScore - firstScore : null }
+  })
+})
+
+// All accounts across all reports for a client (deduplicated by account_number+bureau)
+app.get('/api/mfsn/clients/:clientId/all-accounts', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const clientId = c.req.param('clientId')
+  const accounts = await DB.prepare(`SELECT a.*, cr.pull_date FROM credit_report_accounts a JOIN credit_reports cr ON cr.id = a.credit_report_id WHERE a.client_id = ? ORDER BY a.provider, a.account_name, cr.pull_date DESC`).bind(clientId).all()
+  const seen = new Set<string>()
+  const deduped = (accounts.results as any[]).filter(a => {
+    const key = `${a.provider}-${a.account_name}-${a.account_number}`
+    if (seen.has(key)) return false
+    seen.add(key); return true
+  })
+  const negative = deduped.filter(a => a.past_due_amount > 0 || a.charge_off_amount > 0 || a.times_30_days_late > 0)
+  return c.json({ client_id: clientId, total: deduped.length, negative_count: negative.length, disputed_count: deduped.filter(a => a.is_disputed).length, accounts: deduped })
+})
+
+// Compare two reports side-by-side
+app.get('/api/mfsn/compare', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const report1Id = c.req.query('report1_id'); const report2Id = c.req.query('report2_id')
+  if (!report1Id || !report2Id) return c.json({ error: 'report1_id and report2_id query params required' }, 400)
+  const [r1, r2] = await Promise.all([
+    DB.prepare('SELECT * FROM credit_reports WHERE id = ?').bind(report1Id).first(),
+    DB.prepare('SELECT * FROM credit_reports WHERE id = ?').bind(report2Id).first()
+  ])
+  if (!r1 || !r2) return c.json({ error: 'One or both reports not found' }, 404)
+  const rpt1 = r1 as any; const rpt2 = r2 as any
+  const scoreDiff = {
+    EFX: rpt2.score_efx && rpt1.score_efx ? rpt2.score_efx - rpt1.score_efx : null,
+    TU: rpt2.score_tu && rpt1.score_tu ? rpt2.score_tu - rpt1.score_tu : null,
+    EXP: rpt2.score_exp && rpt1.score_exp ? rpt2.score_exp - rpt1.score_exp : null
+  }
+  return c.json({
+    report1: { id: rpt1.id, date: rpt1.pull_date, scores: { EFX: rpt1.score_efx, TU: rpt1.score_tu, EXP: rpt1.score_exp }, negatives: rpt1.total_negative_accounts, inquiries: rpt1.total_inquiries, accounts: rpt1.total_accounts },
+    report2: { id: rpt2.id, date: rpt2.pull_date, scores: { EFX: rpt2.score_efx, TU: rpt2.score_tu, EXP: rpt2.score_exp }, negatives: rpt2.total_negative_accounts, inquiries: rpt2.total_inquiries, accounts: rpt2.total_accounts },
+    changes: {
+      score_change: scoreDiff,
+      negative_change: rpt2.total_negative_accounts - rpt1.total_negative_accounts,
+      inquiry_change: rpt2.total_inquiries - rpt1.total_inquiries,
+      improved: Object.values(scoreDiff).some(v => v !== null && (v as number) > 0)
+    }
+  })
+})
+
+// Enroll a new member with MFSN (pass-through to MFSN API if supported)
+app.post('/api/mfsn/enroll', async (c) => {
+  const { DB, env } = c
+  const body = await c.req.json() as any
+  const { first_name, last_name, email, phone, address, city, state, zip, dob, ssn_last4, client_id } = body
+  if (!first_name || !last_name || !email) return c.json({ error: 'first_name, last_name, email required' }, 400)
+  const apiUrl = env.MFSN_API_URL || 'https://api.myfreescorenow.com'
+  if (!env.MFSN_API_EMAIL || !env.MFSN_API_PASSWORD) return c.json({ error: 'MFSN credentials not configured' }, 500)
+  try {
+    const loginForm = new FormData(); loginForm.append('email', env.MFSN_API_EMAIL); loginForm.append('password', env.MFSN_API_PASSWORD)
+    const loginRes = await fetch(`${apiUrl}/api/auth/login`, { method: 'POST', body: loginForm })
+    const loginData = await loginRes.json() as any
+    if (!loginData.success) return c.json({ error: 'MFSN auth failed' }, 401)
+    const enrollForm = new FormData()
+    enrollForm.append('first_name', first_name); enrollForm.append('last_name', last_name)
+    enrollForm.append('email', email); if (phone) enrollForm.append('phone', phone)
+    if (address) enrollForm.append('address', address); if (city) enrollForm.append('city', city)
+    if (state) enrollForm.append('state', state); if (zip) enrollForm.append('zip', zip)
+    if (dob) enrollForm.append('dob', dob); if (ssn_last4) enrollForm.append('ssn_last4', ssn_last4)
+    const enrollRes = await fetch(`${apiUrl}/api/auth/enroll`, { method: 'POST', body: enrollForm })
+    const enrollData = await enrollRes.json() as any
+    if (!enrollData.success) return c.json({ error: 'MFSN enrollment failed: ' + enrollData.message, mfsn_response: enrollData }, 400)
+    if (client_id && DB && enrollData.data?.token) {
+      await DB.prepare(`INSERT INTO mfsn_tokens (client_id, mfsn_email, mfsn_token) VALUES (?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET mfsn_email=excluded.mfsn_email, mfsn_token=excluded.mfsn_token, updated_at=datetime('now')`).bind(client_id, email, enrollData.data.token).run()
+      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'mfsn_member_enrolled', 'client', ?, ?)`).bind(client_id, `MFSN member enrolled for ${first_name} ${last_name} <${email}>`).run()
+    }
+    return c.json({ success: true, message: 'Member enrolled in MFSN', token: enrollData.data?.token, member_id: enrollData.data?.member_id, mfsn_response: enrollData.data })
+  } catch (err: any) {
+    return c.json({ error: 'Enrollment request failed: ' + err.message }, 500)
+  }
+})
+
+// HTML Report Viewer — full 3-bureau report rendered as a page
+app.get('/mfsn/report/:reportId', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.html('<h1>Database required</h1>', 500)
+  const reportId = c.req.param('reportId')
+  const [report, accounts, inquiries, pubRecords] = await Promise.all([
+    DB.prepare('SELECT cr.*, cl.first_name, cl.last_name, cl.email, cl.credit_score_start, cl.credit_score_goal FROM credit_reports cr LEFT JOIN clients cl ON cl.id = cr.client_id WHERE cr.id = ?').bind(reportId).first(),
+    DB.prepare('SELECT * FROM credit_report_accounts WHERE credit_report_id = ? ORDER BY provider, charge_off_amount DESC, past_due_amount DESC').bind(reportId).all(),
+    DB.prepare('SELECT * FROM credit_report_inquiries WHERE credit_report_id = ? ORDER BY provider, inquiry_date DESC').bind(reportId).all(),
+    DB.prepare('SELECT * FROM credit_report_public_records WHERE credit_report_id = ? ORDER BY provider').bind(reportId).all()
+  ])
+  if (!report) return c.html('<h1>Report not found</h1>', 404)
+  const r = report as any
+  const accts = accounts.results as any[]
+  const inqs = inquiries.results as any[]
+  const prs = pubRecords.results as any[]
+  const bureaus = ['EFX', 'TU', 'EXP']
+  const bureauNames: any = { EFX: 'Equifax', TU: 'TransUnion', EXP: 'Experian' }
+  const bureauColors: any = { EFX: '#e53e3e', TU: '#3182ce', EXP: '#38a169' }
+  const scores: any = { EFX: r.score_efx, TU: r.score_tu, EXP: r.score_exp }
+  const scoreColor = (s: number) => s >= 740 ? '#38a169' : s >= 670 ? '#d69e2e' : s >= 580 ? '#e67e22' : '#e53e3e'
+  const scoreLabel = (s: number) => s >= 740 ? 'Excellent' : s >= 670 ? 'Good' : s >= 580 ? 'Fair' : 'Poor'
+  const negativeStatuses = ['late', 'collection', 'charge', 'delinq', 'derogatory', 'negative', '30', '60', '90']
+  const isNeg = (a: any) => negativeStatuses.some(s => (a.payment_status || '').toLowerCase().includes(s)) || a.past_due_amount > 0 || a.charge_off_amount > 0
+  const scoreFactors: any = {}
+  if (r.raw_response_json) {
+    try {
+      const raw = JSON.parse(r.raw_response_json)
+      for (const view of (raw?.providerViews || [])) {
+        const p = view.provider || view.summary?.provider
+        if (p) scoreFactors[p] = view.summary?.creditScore?.scoreFactors || []
+      }
+    } catch (_) {}
+  }
+  const formatMoney = (v: number) => v ? `$${v.toLocaleString()}` : '$0'
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3-Bureau Credit Report — ${r.first_name} ${r.last_name}</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2/dist/tailwind.min.css" rel="stylesheet">
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; background: #f7fafc; }
+  .bureau-efx { border-top: 4px solid #e53e3e; }
+  .bureau-tu { border-top: 4px solid #3182ce; }
+  .bureau-exp { border-top: 4px solid #38a169; }
+  .score-ring { width: 80px; height: 80px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 700; border: 6px solid; }
+  .neg-row { background: #fff5f5; border-left: 3px solid #e53e3e; }
+  @media print { .no-print { display: none; } }
+</style>
+</head>
+<body class="min-h-screen p-6">
+<div class="max-w-6xl mx-auto">
+  <!-- Header -->
+  <div class="bg-white rounded-xl shadow p-6 mb-6 flex items-center justify-between">
+    <div>
+      <div class="text-sm text-gray-500 font-medium uppercase tracking-wide">RJ Business Solutions — Credit Report</div>
+      <h1 class="text-2xl font-bold text-gray-800 mt-1">${r.first_name} ${r.last_name}</h1>
+      <div class="text-sm text-gray-500">${r.email || ''} &nbsp;·&nbsp; Report #${r.id} &nbsp;·&nbsp; Pulled ${new Date(r.pull_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
+    </div>
+    <div class="flex gap-3">
+      <a href="/api/mfsn/reports/${reportId}/auto-dispute" class="no-print bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-red-700">Auto-Generate Disputes</a>
+      <button onclick="window.print()" class="no-print bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-gray-200">Print / PDF</button>
+    </div>
+  </div>
+  <!-- Score Summary -->
+  <div class="grid grid-cols-3 gap-4 mb-6">
+    ${bureaus.map(b => `
+    <div class="bg-white rounded-xl shadow p-5 bureau-${b.toLowerCase()}">
+      <div class="flex items-center gap-4">
+        <div class="score-ring" style="color:${scoreColor(scores[b] || 0)};border-color:${scoreColor(scores[b] || 0)}">
+          ${scores[b] || '—'}
+        </div>
+        <div>
+          <div class="font-bold text-lg" style="color:${bureauColors[b]}">${bureauNames[b]}</div>
+          <div class="text-sm font-medium" style="color:${scoreColor(scores[b] || 0)}">${scores[b] ? scoreLabel(scores[b]) : 'No score'}</div>
+          ${r.credit_score_goal ? `<div class="text-xs text-gray-400">Goal: ${r.credit_score_goal} ${scores[b] ? (scores[b] >= r.credit_score_goal ? '✅ Reached' : `(+${r.credit_score_goal - scores[b]} needed)`) : ''}</div>` : ''}
+        </div>
+      </div>
+      ${scoreFactors[b]?.length ? `<div class="mt-3"><div class="text-xs font-semibold text-gray-500 uppercase mb-1">Score Factors</div>${scoreFactors[b].map((f: any) => `<div class="text-xs text-gray-600 py-0.5">• ${f.description || f.code || JSON.stringify(f)}</div>`).join('')}</div>` : ''}
+    </div>`).join('')}
+  </div>
+  <!-- Report Overview Stats -->
+  <div class="grid grid-cols-5 gap-3 mb-6">
+    ${[
+      { label: 'Total Accounts', val: r.total_accounts || 0, color: 'blue' },
+      { label: 'Open Accounts', val: r.total_open_accounts || 0, color: 'green' },
+      { label: 'Negative Items', val: r.total_negative_accounts || 0, color: 'red' },
+      { label: 'Hard Inquiries', val: inqs.filter(i => i.inquiry_type === 'hard').length || r.total_inquiries || 0, color: 'yellow' },
+      { label: 'Public Records', val: prs.length || r.total_public_records || 0, color: 'purple' }
+    ].map(s => `
+    <div class="bg-white rounded-lg shadow p-4 text-center">
+      <div class="text-2xl font-bold text-${s.color}-600">${s.val}</div>
+      <div class="text-xs text-gray-500 mt-1">${s.label}</div>
+    </div>`).join('')}
+  </div>
+  <!-- Accounts by Bureau -->
+  ${bureaus.map(b => {
+    const ba = accts.filter(a => a.provider === b)
+    if (ba.length === 0) return ''
+    return `
+  <div class="bg-white rounded-xl shadow mb-6">
+    <div class="px-6 py-4 border-b flex items-center justify-between">
+      <h2 class="font-bold text-lg" style="color:${bureauColors[b]}">${bureauNames[b]} — ${ba.length} Account${ba.length !== 1 ? 's' : ''}</h2>
+      <span class="text-sm text-gray-500">${ba.filter(isNeg).length} negative</span>
+    </div>
+    <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-4 py-3 text-left">Account</th>
+          <th class="px-4 py-3 text-right">Balance</th>
+          <th class="px-4 py-3 text-right">Limit</th>
+          <th class="px-4 py-3 text-right">Past Due</th>
+          <th class="px-4 py-3 text-center">Status</th>
+          <th class="px-4 py-3 text-center">Late</th>
+          <th class="px-4 py-3 text-center">Disputed</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y">
+        ${ba.map(a => `
+        <tr class="${isNeg(a) ? 'neg-row' : ''}">
+          <td class="px-4 py-3">
+            <div class="font-medium text-gray-800">${a.account_name || 'Unknown'}</div>
+            <div class="text-gray-400 text-xs">${a.account_number || ''} ${a.loan_type ? '· ' + a.loan_type : ''}</div>
+          </td>
+          <td class="px-4 py-3 text-right font-mono">${formatMoney(a.balance_amount)}</td>
+          <td class="px-4 py-3 text-right font-mono text-gray-500">${formatMoney(a.credit_limit_amount)}</td>
+          <td class="px-4 py-3 text-right font-mono ${a.past_due_amount > 0 ? 'text-red-600 font-bold' : 'text-gray-400'}">${formatMoney(a.past_due_amount)}</td>
+          <td class="px-4 py-3 text-center">
+            <span class="inline-block px-2 py-0.5 rounded text-xs font-medium ${isNeg(a) ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${a.payment_status || a.account_status || 'Unknown'}</span>
+          </td>
+          <td class="px-4 py-3 text-center text-xs text-gray-500">${[a.times_30_days_late > 0 ? `${a.times_30_days_late}×30d` : '', a.times_60_days_late > 0 ? `${a.times_60_days_late}×60d` : '', a.times_90_days_late > 0 ? `${a.times_90_days_late}×90d` : ''].filter(Boolean).join(', ') || '—'}</td>
+          <td class="px-4 py-3 text-center">${a.is_disputed ? '<span class="inline-block px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">Filed</span>' : '<span class="text-gray-300 text-xs">No</span>'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>
+  </div>`
+  }).join('')}
+  <!-- Inquiries -->
+  ${inqs.length > 0 ? `
+  <div class="bg-white rounded-xl shadow mb-6">
+    <div class="px-6 py-4 border-b"><h2 class="font-bold text-lg text-gray-800">Hard Inquiries (${inqs.length})</h2></div>
+    <div class="grid grid-cols-3 gap-0 divide-x">
+      ${bureaus.map(b => { const bi = inqs.filter(i => i.provider === b); return `
+      <div class="p-4">
+        <div class="font-semibold text-sm mb-3" style="color:${bureauColors[b]}">${bureauNames[b]} (${bi.length})</div>
+        ${bi.length === 0 ? '<div class="text-gray-400 text-sm">No inquiries</div>' : bi.map(i => `
+        <div class="py-2 border-b last:border-0">
+          <div class="text-sm font-medium text-gray-700">${i.inquirer_name || 'Unknown'}</div>
+          <div class="text-xs text-gray-400">${i.inquiry_date || 'Date unknown'} ${i.inquiry_purpose ? '· ' + i.inquiry_purpose : ''}</div>
+        </div>`).join('')}
+      </div>`}).join('')}
+    </div>
+  </div>` : ''}
+  <!-- Public Records -->
+  ${prs.length > 0 ? `
+  <div class="bg-white rounded-xl shadow mb-6 border-2 border-red-200">
+    <div class="px-6 py-4 border-b bg-red-50"><h2 class="font-bold text-lg text-red-700">⚠ Public Records (${prs.length})</h2></div>
+    <div class="p-6 grid gap-3">
+      ${prs.map(p => `
+      <div class="p-4 bg-red-50 rounded-lg border border-red-200">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="font-bold text-red-800">${p.record_type || 'Public Record'}</div>
+            <div class="text-sm text-red-600">${p.court_name || ''} ${p.filing_date ? '· Filed ' + p.filing_date : ''}</div>
+            ${p.amount > 0 ? `<div class="text-sm font-mono text-red-700 mt-1">Amount: ${formatMoney(p.amount)}</div>` : ''}
+            ${p.status ? `<div class="text-xs text-gray-500 mt-1">Status: ${p.status}</div>` : ''}
+          </div>
+          <span class="text-xs font-bold px-2 py-1 rounded" style="background:${bureauColors[p.provider]}20;color:${bureauColors[p.provider]}">${bureauNames[p.provider] || p.provider}</span>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>` : ''}
+  <!-- Footer -->
+  <div class="text-center text-xs text-gray-400 mt-8 pb-8">
+    Report ID: ${r.id} &nbsp;·&nbsp; Pulled via MyFreeScoreNow &nbsp;·&nbsp; RJ Business Solutions &nbsp;·&nbsp; Confidential — FCRA Protected
+  </div>
+</div>
+</body>
+</html>`
+  return c.html(html)
 })
 
 // ============================================================
