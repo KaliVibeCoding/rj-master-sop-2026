@@ -1,0 +1,409 @@
+You are my Principal Credit Repair SaaS Architect, Compliance Automation Engineer, Twilio Communications Engineer, and AI Agent Builder.
+
+Build a full production-grade credit repair company operating system connected to my omnichannel communication platform.
+
+MISSION:
+Create a secure, compliant, AI-powered credit repair automation platform where users can start by texting, calling, emailing, or chatting with an AI agent. The agent sends a secure intake link. The user enters their email, verifies a one-time token, completes onboarding, signs required documents, uploads credit reports/IDs, and the system starts the full credit repair workflow.
+
+This must operate like a real credit repair company, but smarter, more compliant, automated, scalable, and white-label ready.
+
+CORE FLOW:
+1. User texts, calls, emails, or chats with AI agent.
+2. AI agent identifies intent.
+3. System creates or finds contact.
+4. System sends secure intake link.
+5. User enters email.
+6. System sends one-time token by email/SMS.
+7. User verifies token.
+8. User enters secure portal.
+9. User completes intake form.
+10. User signs required disclosures, agreement, privacy consent, communication consent, credit authorization, cancellation notice, and limited power of attorney if legally appropriate.
+11. User uploads credit reports, ID, proof of address, SSN card if needed, creditor letters, collection notices, and supporting documents.
+12. System parses credit reports.
+13. AI analyzes accounts, violations, Metro2 inconsistencies, dispute opportunities, utilization, scoring factors, debt validation issues, and escalation paths.
+14. System creates a custom credit action plan.
+15. System generates dispute rounds.
+16. System tracks mail, deadlines, bureau responses, furnisher responses, deletions, updates, and escalations.
+17. System updates client by SMS, email, portal, and voice agent.
+18. System creates billing events only when compliant.
+19. System generates reports for admin, client, compliance, and audit review.
+
+COMPLIANCE REQUIREMENTS:
+Build compliance as a core engine, not an afterthought.
+
+Include:
+- CROA compliance
+- FCRA compliance
+- FDCPA compliance
+- ECOA awareness
+- FCBA awareness
+- TCPA consent management
+- TSR awareness
+- CAN-SPAM compliance
+- State credit services organization law framework
+- Privacy policy consent
+- Data retention policy
+- Audit logs
+- Consumer authorization records
+- E-signature logs
+- Cancellation notice workflow
+- No guaranteed outcome language
+- No false claim generation
+- No illegal fee collection before legally allowed performance
+- Required disclosures before contract execution
+- Three-business-day cancellation tracking
+- Dispute deadline tracking
+- Opt-in and opt-out tracking
+- STOP/UNSUBSCRIBE handling
+- DNC suppression
+- Call recording consent rules by state
+- AI response compliance guardrails
+
+DAILY SELF-UPDATING COMPLIANCE ENGINE:
+Build a scheduled compliance updater that runs daily.
+
+It must:
+- Check official sources for updates:
+  - CFPB
+  - FTC
+  - FCC
+  - Federal Register
+  - eCFR
+  - state AG sites where configured
+  - state credit services organization laws
+- Store compliance updates in database.
+- Version compliance rules.
+- Flag changes requiring human review.
+- Never auto-change legal templates without approval.
+- Create admin alerts.
+- Generate daily compliance digest.
+- Update AI guardrails after approval.
+- Log every rule change.
+
+Create tables:
+- compliance_sources
+- compliance_rule_versions
+- compliance_updates
+- compliance_alerts
+- legal_template_versions
+- approval_logs
+
+SECURE INTAKE SYSTEM:
+Build tokenized intake.
+
+Requirements:
+- Magic link login
+- One-time token verification
+- Token expiration
+- Rate limiting
+- IP/device logging
+- Email and SMS verification
+- Encrypted PII storage
+- Secure file uploads
+- Malware scan hook
+- Signed URL access
+- Role-based access control
+- Client portal
+- Admin portal
+
+COMMUNICATION CHANNELS:
+Use Twilio and email.
+
+Channels:
+- SMS
+- Voice
+- AI voice agent
+- Email
+- Web chat
+- WhatsApp optional
+
+Communication features:
+- Send intake link
+- Send reminders
+- Send credit report upload request
+- Send document signature request
+- Send dispute status updates
+- Send payment links
+- Send appointment links
+- Send compliance notices
+- Handle STOP, START, HELP
+- Log every communication
+
+AI AGENTS:
+Build these agents:
+
+1. Intake Agent
+- Handles first contact
+- Sends secure link
+- Explains process without guarantees
+
+2. Credit Analysis Agent
+- Reads credit report data
+- Finds negative accounts, utilization, inquiries, personal info errors, collections, charge-offs, late payments, bankruptcies, repos, foreclosures, duplicate accounts
+
+3. Dispute Strategy Agent
+- Chooses FCRA 611, FCRA 623, debt validation, goodwill, factual dispute, identity dispute, mixed file, obsolete reporting, inaccurate balance, inaccurate date, duplicate account, Metro2 inconsistency
+
+4. Compliance Review Agent
+- Reviews every letter, text, email, landing page, campaign, and AI message before sending
+
+5. Client Update Agent
+- Gives clients clear status updates by SMS/email/portal
+
+6. Escalation Agent
+- Routes unresolved issues to CFPB, FTC, BBB, state AG, attorney referral, arbitration/mediation workflow, or small claims/litigation prep when appropriate
+
+7. Billing Compliance Agent
+- Prevents illegal advance billing
+- Allows compliant subscriptions, monitoring, education, software access, or pay-for-performance billing only if configured correctly
+
+8. Business Credit Agent
+- Handles EIN, DUNS, NAV, vendor tiers, Net 30s, tradeline tracking, Paydex roadmap, funding readiness, no-PG progression
+
+DATABASE TABLES:
+Create production schema for:
+- tenants
+- users
+- roles
+- permissions
+- clients
+- contacts
+- contact_channels
+- consent_records
+- opt_outs
+- intake_sessions
+- magic_tokens
+- credit_reports
+- credit_report_files
+- credit_accounts
+- credit_inquiries
+- credit_personal_info
+- credit_scores
+- dispute_cases
+- dispute_items
+- dispute_rounds
+- dispute_letters
+- dispute_reasons
+- bureau_responses
+- furnisher_responses
+- certified_mail_records
+- deadlines
+- tasks
+- notes
+- documents
+- e_signatures
+- legal_templates
+- compliance_rules
+- compliance_updates
+- communication_logs
+- sms_messages
+- email_messages
+- calls
+- call_recordings
+- ai_agent_sessions
+- ai_agent_logs
+- audit_logs
+- subscriptions
+- invoices
+- usage_logs
+- payments
+- refunds
+- business_credit_profiles
+- vendor_accounts
+- funding_readiness
+- affiliate_referrals
+
+FRONTEND PAGES:
+Use the same dark Twilio Omni Agent inspired design.
+
+Build:
+- Landing page
+- Secure intake page
+- Token verification page
+- Client onboarding wizard
+- Client dashboard
+- Credit report upload page
+- Credit analysis page
+- Dispute status timeline
+- Document signature page
+- Messaging center
+- Appointment page
+- Billing page
+- Admin dashboard
+- Client management page
+- Dispute command center
+- AI agent control center
+- Compliance center
+- Campaign center
+- Call center dashboard
+- Integration settings
+- Stripe settings
+- Twilio settings
+- GoHighLevel settings
+- Zapier webhook page
+- Business credit roadmap page
+- Reports page
+- Audit log page
+
+BACKEND STACK:
+- FastAPI
+- PostgreSQL
+- Redis
+- Celery or RQ
+- SQLAlchemy
+- Alembic
+- Pydantic
+- JWT auth
+- Magic link auth
+- Twilio SDK
+- Stripe SDK
+- SendGrid or Resend
+- S3/R2 storage
+- OpenAI/Gemini/Anthropic-compatible AI layer
+- Docker
+- OpenAPI docs
+
+FRONTEND STACK:
+- Next.js App Router
+- TypeScript
+- TailwindCSS
+- Framer Motion
+- ShadCN UI
+- Zustand
+- React Hook Form
+- Zod
+- WebSocket real-time updates
+
+API ENDPOINTS:
+Build these:
+
+/auth/magic-link/request
+/auth/magic-link/verify
+/auth/token/verify
+/intake/start
+/intake/submit
+/intake/upload
+/intake/sign
+/clients
+/clients/{id}
+/credit-reports/upload
+/credit-reports/parse
+/credit-reports/{id}/analysis
+/disputes/create
+/disputes/{id}
+/disputes/{id}/letters
+/disputes/{id}/send
+/disputes/{id}/responses
+/communications/sms/send
+/communications/email/send
+/communications/call/start
+/communications/webhooks/twilio
+/communications/webhooks/email
+/ai/intake/respond
+/ai/credit/analyze
+/ai/dispute/strategy
+/ai/compliance/review
+/compliance/rules
+/compliance/updates/run
+/compliance/updates/digest
+/billing/checkout
+/billing/webhooks/stripe
+/integrations/zapier/webhook
+/integrations/ghl/sync
+/integrations/twilio/settings
+/integrations/stripe/settings
+/admin/audit-logs
+
+SECURITY:
+Implement:
+- RBAC
+- Multi-tenant data isolation
+- Row-level tenant checks
+- PII encryption
+- File encryption
+- Secure signed URLs
+- Audit logs
+- Rate limiting
+- Webhook signature verification
+- Stripe signature verification
+- Twilio signature verification
+- Secrets only in environment variables
+- No hardcoded keys
+- No plaintext SSNs
+- No logs containing sensitive full PII
+- Data retention controls
+
+BILLING:
+Integrate Stripe.
+
+Support:
+- SaaS subscriptions
+- Credit monitoring affiliate tracking
+- Education product billing
+- Software access billing
+- Usage-based billing
+- Per-client agency billing
+- White-label plans
+- Compliance-safe pay-for-results configuration
+- Billing lockout if CROA/TSR risk detected
+
+IMPORTANT:
+The system must not promise score increases.
+The system must not guarantee deletions.
+The system must not charge illegal advance credit repair fees.
+The system must not send SMS without consent.
+The system must not generate legal conclusions as if it is a law firm unless configured under attorney supervision.
+The system must store all consumer authorization and communication consent.
+
+OUTPUT REQUIRED:
+Generate the full project in phases.
+
+Phase 1:
+- Architecture
+- Database schema
+- API map
+- Compliance rules
+- Intake flow
+- Twilio SMS/email intake
+- Magic link/token verification
+
+Phase 2:
+- Credit report upload
+- Parsing
+- Credit analysis
+- Dispute engine
+- Letter generation
+- Timeline tracking
+
+Phase 3:
+- AI agents
+- Campaigns
+- Call center
+- Voice agent
+- GoHighLevel
+- Zapier
+- Stripe
+
+Phase 4:
+- Daily compliance updater
+- Admin compliance center
+- Audit exports
+- White-label system
+- Deployment
+
+Start with Phase 1 and generate:
+1. Full repo structure
+2. Database migrations
+3. Backend code
+4. Frontend pages
+5. Twilio webhook handlers
+6. Email magic link flow
+7. Secure token verification
+8. Compliance checklist engine
+9. Docker setup
+10. Deployment instructions
+
+No placeholders.
+No fake code.
+No summaries.
+Build real files.
