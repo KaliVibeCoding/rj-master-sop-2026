@@ -14,14 +14,17 @@ A full-stack credit repair business operations platform + complete SaaS infrastr
 - **Styling**: Tailwind CSS (CDN in dev)
 
 ## Stats
-- **190 route handlers** across 28 feature groups
-- **6,238 lines** of TypeScript in `src/index.tsx`
-- **33 database tables** across 6 migrations
+- **249 route handlers** across 36 feature groups
+- **7,720+ lines** of TypeScript in `src/index.tsx`
+- **49 database tables** across 7 migrations
 - **90 environment variables** across 12 categories
 - **62 SOPs** across 7 phases
 - **239+ templates** in `src/templates.ts`
 - **6 email sequences** + **5 SMS sequences** (seeded)
 - **4 staff users** (seeded)
+- **10 compliance rules** seeded (CROA, FCRA, TCPA, FDCPA, TSR, CAN-SPAM)
+- **5 compliance sources** seeded (CFPB, FTC, FCC, Federal Register, eCFR)
+- **2 legal templates** seeded (croa_disclosure, cancellation_notice)
 
 ## New Features (Migration 0006)
 - **Staff Auth** — `/login` page, `POST /api/auth/login` (SHA-256 + D1 sessions, HTTPOnly cookie, 8hr expiry), logout, `/api/auth/me`, `/api/auth/sessions`

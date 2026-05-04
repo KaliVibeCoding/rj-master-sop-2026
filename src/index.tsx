@@ -6234,5 +6234,1485 @@ app.get('/static/mobile.css', (c) => {
   return new Response(css, { headers: { 'Content-Type': 'text/css', 'Cache-Control': 'public, max-age=86400' } })
 })
 
+
+// ============================================================
+// HELPER: Simple AI wrapper (returns string, uses existing callAI)
+// ============================================================
+async function callAISimple(env: any, systemPrompt: string, userMessage: string, maxTokens = 800): Promise<string> {
+  try {
+    const result = await callAI(env as any, systemPrompt, userMessage)
+    return result.text || 'No response.'
+  } catch { return 'AI unavailable — no API key configured.' }
+}
+
+// ============================================================
+// HELPER: Generate crypto token
+// ============================================================
+function genToken(len = 32): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  let t = ''
+  for (let i = 0; i < len; i++) t += chars[Math.floor(Math.random() * chars.length)]
+  return t
+}
+
+// ============================================================
+// HELPER: Send email (SendGrid/Resend)
+// ============================================================
+async function sendEmail(env: any, to: string, subject: string, text: string, html?: string): Promise<boolean> {
+  if (env.SENDGRID_API_KEY) {
+    const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ personalizations: [{ to: [{ email: to }] }], from: { email: env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' }, subject, content: [{ type: html ? 'text/html' : 'text/plain', value: html || text }] })
+    })
+    return r.ok
+  }
+  if (env.RESEND_API_KEY) {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org'}>`, to: [to], subject, html: html || `<pre>${text}</pre>` })
+    })
+    return r.ok
+  }
+  return false
+}
+
+// ============================================================
+// HELPER: Send SMS via Twilio
+// ============================================================
+async function sendSMS(env: any, to: string, body: string): Promise<boolean> {
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN || !env.TWILIO_PHONE_NUMBER) return false
+  const creds = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+  const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ From: env.TWILIO_PHONE_NUMBER, To: to, Body: body })
+  })
+  return r.ok
+}
+
+// ============================================================
+// FEATURE: MAGIC LINK INTAKE SYSTEM
+// ============================================================
+
+// Public intake landing page
+app.get('/intake', (c) => {
+  const company = 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Start Your Credit Repair — ${company}</title><script src="https://cdn.tailwindcss.com"></script></head><body class="min-h-screen bg-gradient-to-br from-gray-900 via-blue-950 to-gray-900 flex items-center justify-center p-4">
+<div class="w-full max-w-md">
+  <div class="text-center mb-8">
+    <div class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4 text-2xl font-bold text-white">RJ</div>
+    <h1 class="text-3xl font-bold text-white mb-2">${company}</h1>
+    <p class="text-blue-300">Start your credit repair journey today</p>
+  </div>
+  <div class="bg-white/10 backdrop-blur border border-white/20 rounded-2xl p-8">
+    <h2 class="text-xl font-semibold text-white mb-2">Get Your Free Credit Analysis</h2>
+    <p class="text-blue-200 text-sm mb-6">Enter your email and we'll send you a secure access link. No password needed.</p>
+    <div id="form-section">
+      <form id="intake-form" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-blue-200 mb-1">Your Email Address</label>
+          <input type="email" id="email" required placeholder="you@example.com" class="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-xl text-white placeholder-white/40 focus:outline-none focus:border-blue-400">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-blue-200 mb-1">Phone Number (optional)</label>
+          <input type="tel" id="phone" placeholder="+1 (555) 000-0000" class="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-xl text-white placeholder-white/40 focus:outline-none focus:border-blue-400">
+        </div>
+        <button type="submit" id="submit-btn" class="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl transition">Send My Secure Link →</button>
+      </form>
+      <p id="msg" class="mt-4 text-center text-sm hidden"></p>
+    </div>
+    <div id="verify-section" class="hidden space-y-4">
+      <p class="text-blue-200 text-sm text-center">We sent a 6-digit code to your email. Enter it below:</p>
+      <input type="text" id="otp" maxlength="6" placeholder="000000" class="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-xl text-white text-center text-2xl tracking-widest focus:outline-none focus:border-blue-400">
+      <button onclick="verifyOTP()" class="w-full py-3 bg-green-600 hover:bg-green-500 text-white font-semibold rounded-xl transition">Verify & Enter Portal →</button>
+      <p id="verify-msg" class="text-center text-sm"></p>
+      <button onclick="location.reload()" class="w-full text-blue-300 text-sm hover:text-white">← Start over</button>
+    </div>
+  </div>
+  <p class="text-center text-xs text-blue-400 mt-6">No credit card required. CROA compliant. Your data is encrypted.</p>
+</div>
+<script>
+let sessionEmail = ''
+document.getElementById('intake-form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const btn = document.getElementById('submit-btn')
+  const msg = document.getElementById('msg')
+  btn.disabled = true; btn.textContent = 'Sending...'
+  const email = document.getElementById('email').value
+  const phone = document.getElementById('phone').value
+  sessionEmail = email
+  const r = await fetch('/api/intake/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email, phone, referral: document.referrer }) })
+  const d = await r.json()
+  if (d.success) {
+    document.getElementById('form-section').classList.add('hidden')
+    document.getElementById('verify-section').classList.remove('hidden')
+    msg.textContent = ''
+  } else {
+    btn.disabled = false; btn.textContent = 'Send My Secure Link →'
+    msg.className = 'mt-4 text-center text-sm text-red-400'
+    msg.textContent = d.error || 'Something went wrong. Please try again.'
+    msg.classList.remove('hidden')
+  }
+})
+async function verifyOTP() {
+  const otp = document.getElementById('otp').value.trim()
+  const msg = document.getElementById('verify-msg')
+  if (otp.length !== 6) { msg.className='text-red-400 text-sm text-center'; msg.textContent='Please enter the 6-digit code.'; return }
+  msg.className='text-blue-300 text-sm text-center'; msg.textContent='Verifying...'
+  const r = await fetch('/api/intake/verify', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email: sessionEmail, otp }) })
+  const d = await r.json()
+  if (d.success && d.redirect) { window.location.href = d.redirect }
+  else { msg.className='text-red-400 text-sm text-center'; msg.textContent = d.error || 'Invalid code. Please try again.' }
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/intake/start — create OTP + intake session, send email/SMS
+app.post('/api/intake/start', async (c) => {
+  const env = c.env
+  const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const email = (body.email || '').trim().toLowerCase()
+  const phone = (body.phone || '').trim()
+  if (!email) return c.json({ error: 'Email required' }, 400)
+  // Rate limit: max 3 tokens per email in last 10 min
+  const recent = await DB.prepare(`SELECT COUNT(*) as cnt FROM magic_tokens WHERE email = ? AND created_at > datetime('now','-10 minutes')`).bind(email).first() as any
+  if ((recent?.cnt || 0) >= 3) return c.json({ error: 'Too many requests. Please wait 10 minutes.' }, 429)
+  const otp = String(Math.floor(100000 + Math.random() * 900000))
+  const sessionToken = genToken(48)
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString()
+  // Find or create client
+  let client = await DB.prepare(`SELECT id FROM clients WHERE email = ?`).bind(email).first() as any
+  if (!client) {
+    await DB.prepare(`INSERT INTO clients (first_name, last_name, email, phone, status, source) VALUES ('New','Lead',?,?,'lead','intake')`).bind(email, phone || null).run()
+    client = await DB.prepare(`SELECT id FROM clients WHERE email = ?`).bind(email).first() as any
+  }
+  // Create OTP token
+  await DB.prepare(`INSERT INTO magic_tokens (token, email, phone, client_id, token_type, expires_at) VALUES (?,?,?,?,'intake',?)`).bind(otp, email, phone || null, client?.id || null, expiresAt).run()
+  // Create intake session
+  await DB.prepare(`INSERT INTO intake_sessions (session_token, client_id, email, phone, step, ip_address, referral_source) VALUES (?,?,?,?,'start',?,?)`).bind(sessionToken, client?.id || null, email, phone || null, c.req.header('CF-Connecting-IP') || c.req.header('x-forwarded-for') || '', body.referral || '').run()
+  // Send OTP email
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const emailSent = await sendEmail(env, email, `Your ${company} Access Code: ${otp}`,
+    `Your one-time access code is: ${otp}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, please ignore this email.`,
+    `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px"><h2 style="color:#1e40af">Your Access Code</h2><div style="font-size:2.5rem;font-weight:bold;letter-spacing:0.3em;color:#1d4ed8;padding:20px;background:#eff6ff;border-radius:12px;text-align:center">${otp}</div><p style="color:#64748b;margin-top:16px">This code expires in <strong>15 minutes</strong>. Do not share it with anyone.</p><p style="color:#64748b;font-size:0.85rem">If you did not request this code, please ignore this email.</p><hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0"><p style="color:#94a3b8;font-size:0.75rem">${company} | CROA Compliant</p></div>`)
+  // Send SMS if phone provided
+  if (phone) await sendSMS(env, phone, `${company}: Your access code is ${otp}. Valid 15 min. Reply STOP to opt out.`)
+  return c.json({ success: true, session_token: sessionToken, email_sent: emailSent })
+})
+
+// POST /api/intake/verify — verify OTP, return portal redirect
+app.post('/api/intake/verify', async (c) => {
+  const env = c.env
+  const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const email = (body.email || '').trim().toLowerCase()
+  const otp = (body.otp || '').trim()
+  if (!email || !otp) return c.json({ error: 'Email and code required' }, 400)
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND email = ? AND token_type = 'intake' AND used_at IS NULL AND expires_at > datetime('now')`).bind(otp, email).first() as any
+  if (!token) return c.json({ error: 'Invalid or expired code. Please request a new one.' }, 401)
+  await DB.prepare(`UPDATE magic_tokens SET used_at = datetime('now') WHERE id = ?`).bind(token.id).run()
+  // Generate portal session token
+  const portalToken = genToken(64)
+  const portalExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  await DB.prepare(`INSERT INTO magic_tokens (token, email, client_id, token_type, expires_at) VALUES (?,?,?,'portal',?)`).bind(portalToken, email, token.client_id, portalExpires).run()
+  await DB.prepare(`UPDATE intake_sessions SET step = 'verified' WHERE email = ? AND step = 'start'`).bind(email).run()
+  // Log to audit
+  if (token.client_id) await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind(email, 'magic_link_verified', 'client', token.client_id, `IP: ${c.req.header('CF-Connecting-IP') || 'unknown'}`).run()
+  return c.json({ success: true, redirect: `/intake/portal/${portalToken}` })
+})
+
+// GET /intake/portal/:token — client secure intake portal
+app.get('/intake/portal/:token', async (c) => {
+  const env = c.env
+  const { DB } = env
+  const portalToken = c.req.param('token')
+  if (!DB) return c.html('<h1>Database unavailable</h1>', 500)
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND token_type = 'portal' AND expires_at > datetime('now')`).bind(portalToken).first() as any
+  if (!token) return c.html(`<!DOCTYPE html><html><head><title>Link Expired</title><script src="https://cdn.tailwindcss.com"></script></head><body class="min-h-screen bg-gray-900 flex items-center justify-center"><div class="text-center text-white"><h1 class="text-2xl font-bold mb-2">Link Expired</h1><p class="text-gray-400 mb-6">This link has expired or is invalid. Please request a new one.</p><a href="/intake" class="px-6 py-3 bg-blue-600 rounded-xl hover:bg-blue-500">Get New Link →</a></div></body></html>`, 401)
+  const client = token.client_id ? await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(token.client_id).first() as any : null
+  const sigs = client ? await DB.prepare(`SELECT document_type, signed_at FROM e_signatures WHERE client_id = ? ORDER BY signed_at DESC`).bind(client.id).all() : { results: [] }
+  const signedTypes = (sigs.results as any[]).map(s => s.document_type)
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Client Portal — ${company}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="min-h-screen bg-gradient-to-br from-gray-900 via-blue-950 to-gray-900 p-4">
+<div class="max-w-2xl mx-auto">
+  <div class="flex items-center gap-3 mb-8 pt-4">
+    <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white font-bold">RJ</div>
+    <div><p class="text-white font-semibold">${company}</p><p class="text-blue-300 text-sm">Secure Client Portal</p></div>
+  </div>
+  <div class="bg-white/10 backdrop-blur border border-white/20 rounded-2xl p-6 mb-4">
+    <h2 class="text-xl font-bold text-white mb-1">Welcome${client ? ', ' + client.first_name : ''}!</h2>
+    <p class="text-blue-200 text-sm mb-6">Complete each step below to begin your credit repair program.</p>
+    <div class="space-y-3">
+      ${[
+        { type: 'croa_disclosure', label: '1. CROA Consumer Rights Disclosure', desc: 'Required by federal law before any services begin' },
+        { type: 'service_agreement', label: '2. Service Agreement', desc: 'Your contract and terms of service' },
+        { type: 'cancellation_notice', label: '3. Three-Day Cancellation Notice', desc: 'Your right to cancel within 3 business days' },
+        { type: 'privacy_policy', label: '4. Privacy Policy', desc: 'How we protect and use your information' },
+        { type: 'credit_auth', label: '5. Credit Report Authorization', desc: 'Authorize us to access and dispute your credit' },
+        { type: 'communication_consent', label: '6. Communication Consent (TCPA)', desc: 'Consent to SMS, email, and phone contact' },
+      ].map(doc => {
+        const done = signedTypes.includes(doc.type)
+        return `<div class="flex items-center justify-between p-4 rounded-xl ${done ? 'bg-green-900/30 border border-green-500/30' : 'bg-white/5 border border-white/10'}">
+          <div><p class="text-white font-medium text-sm">${doc.label}</p><p class="text-blue-300 text-xs">${doc.desc}</p></div>
+          <a href="/sign/${portalToken}?doc=${doc.type}" class="${done ? 'text-green-400 text-xs font-medium' : 'px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg'}">${done ? '✓ Signed' : 'Sign →'}</a>
+        </div>`
+      }).join('')}
+    </div>
+  </div>
+  <div class="bg-white/10 backdrop-blur border border-white/20 rounded-2xl p-6 mb-4">
+    <h3 class="text-white font-semibold mb-4">Upload Documents</h3>
+    <form id="upload-form" class="space-y-3">
+      <div>
+        <label class="block text-sm text-blue-200 mb-1">Document Type</label>
+        <select id="doc-type" class="w-full px-3 py-2 bg-white/10 border border-white/30 rounded-xl text-white text-sm">
+          <option value="credit_report">Credit Report (PDF/image)</option>
+          <option value="id">Government-Issued ID</option>
+          <option value="proof_of_address">Proof of Address</option>
+          <option value="ssn_card">Social Security Card</option>
+          <option value="creditor_letter">Creditor/Collector Letter</option>
+          <option value="other">Other Supporting Document</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-blue-200 mb-1">File (max 10MB)</label>
+        <input type="file" id="file-input" accept=".pdf,.jpg,.jpeg,.png,.heic" class="w-full text-sm text-blue-200">
+      </div>
+      <button type="button" onclick="uploadDoc()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium">Upload Document</button>
+      <p id="upload-msg" class="text-sm text-center hidden"></p>
+    </form>
+  </div>
+  <div class="bg-white/10 backdrop-blur border border-white/20 rounded-2xl p-6">
+    <h3 class="text-white font-semibold mb-4">Your Information</h3>
+    <form id="info-form" class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="block text-xs text-blue-300 mb-1">First Name</label><input id="fn" type="text" value="${client?.first_name || ''}" class="w-full px-3 py-2 bg-white/10 border border-white/30 rounded-xl text-white text-sm focus:outline-none focus:border-blue-400"></div>
+        <div><label class="block text-xs text-blue-300 mb-1">Last Name</label><input id="ln" type="text" value="${client?.last_name || ''}" class="w-full px-3 py-2 bg-white/10 border border-white/30 rounded-xl text-white text-sm focus:outline-none focus:border-blue-400"></div>
+      </div>
+      <div><label class="block text-xs text-blue-300 mb-1">Phone</label><input id="ph" type="tel" value="${client?.phone || ''}" class="w-full px-3 py-2 bg-white/10 border border-white/30 rounded-xl text-white text-sm focus:outline-none focus:border-blue-400"></div>
+      <div><label class="block text-xs text-blue-300 mb-1">Credit Score Goal</label><input id="goal" type="number" value="${client?.credit_score_goal || ''}" placeholder="e.g. 750" class="w-full px-3 py-2 bg-white/10 border border-white/30 rounded-xl text-white text-sm focus:outline-none focus:border-blue-400"></div>
+      <button type="button" onclick="saveInfo()" class="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium">Save My Information</button>
+      <p id="info-msg" class="text-sm text-center hidden"></p>
+    </form>
+  </div>
+</div>
+<script>
+async function uploadDoc() {
+  const file = document.getElementById('file-input').files[0]
+  const type = document.getElementById('doc-type').value
+  const msg = document.getElementById('upload-msg')
+  if (!file) { msg.className='text-red-400 text-sm text-center'; msg.textContent='Please select a file.'; msg.classList.remove('hidden'); return }
+  msg.className='text-blue-300 text-sm text-center'; msg.textContent='Uploading...'; msg.classList.remove('hidden')
+  const fd = new FormData(); fd.append('file', file); fd.append('doc_type', type); fd.append('token', '${portalToken}')
+  const r = await fetch('/api/intake/upload', { method: 'POST', body: fd })
+  const d = await r.json()
+  if (d.success) { msg.className='text-green-400 text-sm text-center'; msg.textContent='✓ Uploaded successfully!' }
+  else { msg.className='text-red-400 text-sm text-center'; msg.textContent = d.error || 'Upload failed.' }
+}
+async function saveInfo() {
+  const msg = document.getElementById('info-msg')
+  const r = await fetch('/api/intake/submit', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token:'${portalToken}', first_name: document.getElementById('fn').value, last_name: document.getElementById('ln').value, phone: document.getElementById('ph').value, credit_score_goal: document.getElementById('goal').value }) })
+  const d = await r.json()
+  if (d.success) { msg.className='text-green-400 text-sm text-center'; msg.textContent='✓ Information saved!'; msg.classList.remove('hidden') }
+  else { msg.className='text-red-400 text-sm text-center'; msg.textContent = d.error || 'Save failed.'; msg.classList.remove('hidden') }
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/intake/submit — save intake info from portal
+app.post('/api/intake/submit', async (c) => {
+  const env = c.env
+  const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND token_type = 'portal' AND expires_at > datetime('now')`).bind(body.token || '').first() as any
+  if (!token) return c.json({ error: 'Invalid or expired session' }, 401)
+  const updates: string[] = []
+  const vals: any[] = []
+  if (body.first_name) { updates.push('first_name = ?'); vals.push(body.first_name) }
+  if (body.last_name) { updates.push('last_name = ?'); vals.push(body.last_name) }
+  if (body.phone) { updates.push('phone = ?'); vals.push(body.phone) }
+  if (body.credit_score_goal) { updates.push('credit_score_goal = ?'); vals.push(parseInt(body.credit_score_goal)) }
+  updates.push("status = CASE WHEN status = 'lead' THEN 'onboarding' ELSE status END")
+  updates.push("updated_at = datetime('now')")
+  if (updates.length && token.client_id) {
+    await DB.prepare(`UPDATE clients SET ${updates.join(', ')} WHERE id = ?`).bind(...vals, token.client_id).run()
+    await DB.prepare(`UPDATE intake_sessions SET step = 'info', updated_at = datetime('now') WHERE email = ?`).bind(token.email).run()
+  }
+  return c.json({ success: true })
+})
+
+// POST /api/intake/upload — handle document uploads (base64 stored in client_documents)
+app.post('/api/intake/upload', async (c) => {
+  const env = c.env
+  const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const formData = await c.req.formData().catch(() => null)
+  if (!formData) return c.json({ error: 'Invalid form data' }, 400)
+  const tokenStr = formData.get('token') as string
+  const docType = formData.get('doc_type') as string || 'other'
+  const file = formData.get('file') as File | null
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND token_type = 'portal' AND expires_at > datetime('now')`).bind(tokenStr || '').first() as any
+  if (!token) return c.json({ error: 'Invalid or expired session' }, 401)
+  if (!file) return c.json({ error: 'No file provided' }, 400)
+  if (file.size > 10 * 1024 * 1024) return c.json({ error: 'File too large (max 10MB)' }, 400)
+  const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/heic', 'image/webp']
+  if (!allowedTypes.includes(file.type)) return c.json({ error: 'Invalid file type. PDF, JPG, PNG allowed.' }, 400)
+  // Store file reference (in production, upload to R2)
+  const fileName = `${docType}_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+  await DB.prepare(`INSERT INTO client_documents (client_id, document_type, document_name, status) VALUES (?,?,?,'received')`).bind(token.client_id, docType, fileName).run()
+  if (token.client_id) await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind(token.email, 'document_uploaded', 'client', token.client_id, `Type: ${docType}, File: ${fileName}, Size: ${file.size}`).run()
+  return c.json({ success: true, file_name: fileName })
+})
+
+// ============================================================
+// FEATURE: E-SIGNATURE ENGINE
+// ============================================================
+
+// GET /sign/:token?doc=type — signature page
+app.get('/sign/:token', async (c) => {
+  const env = c.env
+  const { DB } = env
+  const portalToken = c.req.param('token')
+  const docType = c.req.query('doc') || 'service_agreement'
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND token_type = 'portal' AND expires_at > datetime('now')`).bind(portalToken).first() as any
+  if (!token) return c.html(`<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>Session Expired</h2><p>Please <a href="/intake">start over</a>.</p></body></html>`, 401)
+  const client = token.client_id ? await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(token.client_id).first() as any : null
+  // Get active template
+  const tmpl = await DB.prepare(`SELECT * FROM legal_template_versions WHERE template_type = ? AND is_active = 1 ORDER BY id DESC LIMIT 1`).bind(docType).first() as any
+  const docLabels: Record<string, string> = {
+    croa_disclosure: 'CROA Consumer Rights Disclosure',
+    service_agreement: 'Service Agreement',
+    cancellation_notice: 'Three-Day Cancellation Notice',
+    privacy_policy: 'Privacy Policy',
+    credit_auth: 'Credit Report Authorization',
+    communication_consent: 'Communication Consent (TCPA)',
+    limited_poa: 'Limited Power of Attorney'
+  }
+  const label = docLabels[docType] || 'Document'
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign: ${label}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="min-h-screen bg-gray-50">
+<div class="max-w-2xl mx-auto p-4">
+  <div class="flex items-center gap-3 py-4 mb-4">
+    <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">RJ</div>
+    <div><p class="font-semibold text-gray-900">${company}</p><p class="text-xs text-gray-500">Secure Document Signing</p></div>
+    <a href="/intake/portal/${portalToken}" class="ml-auto text-sm text-blue-600 hover:underline">← Back to Portal</a>
+  </div>
+  <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-4">
+    <h1 class="text-lg font-bold text-gray-900 mb-1">${label}</h1>
+    <p class="text-sm text-gray-500 mb-4">Please read the document below carefully before signing.</p>
+    <div class="bg-gray-50 rounded-xl p-4 max-h-80 overflow-y-auto text-sm text-gray-700 whitespace-pre-wrap leading-relaxed border border-gray-200 mb-4">${tmpl?.content || '[Document content not available. Please contact support.]'}</div>
+  </div>
+  <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-4">
+    <h2 class="font-semibold text-gray-900 mb-3">Your Electronic Signature</h2>
+    <div class="mb-4">
+      <p class="text-sm text-gray-600 mb-2">Draw your signature below:</p>
+      <canvas id="sig-canvas" width="500" height="120" class="w-full border-2 border-gray-300 rounded-xl bg-white cursor-crosshair" style="touch-action:none"></canvas>
+      <button onclick="clearSig()" class="mt-1 text-xs text-gray-400 hover:text-gray-700">Clear</button>
+    </div>
+    <div class="mb-4">
+      <p class="text-sm text-gray-600 mb-2">Or type your full name:</p>
+      <input id="typed-sig" type="text" placeholder="${client?.first_name || 'Your'} ${client?.last_name || 'Name'}" class="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm focus:outline-none focus:border-blue-400">
+    </div>
+    <div class="flex items-start gap-2 mb-4">
+      <input type="checkbox" id="agree-check" class="mt-0.5">
+      <label for="agree-check" class="text-sm text-gray-600">I have read and agree to the ${label}. I understand this is a legally binding electronic signature.</label>
+    </div>
+    <button onclick="submitSignature()" class="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl">Sign Document →</button>
+    <p id="sign-msg" class="text-sm text-center mt-3 hidden"></p>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('sig-canvas')
+const ctx = canvas.getContext('2d')
+let drawing = false, hasSig = false
+ctx.strokeStyle = '#1e40af'; ctx.lineWidth = 2; ctx.lineCap = 'round'
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  if (e.touches) return { x: (e.touches[0].clientX - rect.left) * scaleX, y: (e.touches[0].clientY - rect.top) * scaleY }
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+canvas.addEventListener('mousedown', e => { drawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y) })
+canvas.addEventListener('mousemove', e => { if (!drawing) return; const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); hasSig = true })
+canvas.addEventListener('mouseup', () => drawing = false)
+canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y) }, {passive:false})
+canvas.addEventListener('touchmove', e => { e.preventDefault(); if (!drawing) return; const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); hasSig = true }, {passive:false})
+canvas.addEventListener('touchend', () => drawing = false)
+function clearSig() { ctx.clearRect(0,0,canvas.width,canvas.height); hasSig = false }
+async function submitSignature() {
+  const msg = document.getElementById('sign-msg')
+  if (!document.getElementById('agree-check').checked) { msg.className='text-red-400 text-sm text-center'; msg.textContent='Please check the agreement box.'; msg.classList.remove('hidden'); return }
+  const typedSig = document.getElementById('typed-sig').value.trim()
+  if (!hasSig && !typedSig) { msg.className='text-red-400 text-sm text-center'; msg.textContent='Please draw or type your signature.'; msg.classList.remove('hidden'); return }
+  const sigData = hasSig ? canvas.toDataURL('image/png') : typedSig
+  const method = hasSig ? 'drawn' : 'typed'
+  msg.className='text-blue-400 text-sm text-center'; msg.textContent='Saving signature...'; msg.classList.remove('hidden')
+  const r = await fetch('/api/sign/submit', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: '${portalToken}', doc_type: '${docType}', sig_data: sigData, sig_method: method }) })
+  const d = await r.json()
+  if (d.success) { msg.className='text-green-400 text-sm text-center'; msg.textContent='✓ Signed successfully!'; setTimeout(() => window.location.href='/intake/portal/${portalToken}', 1500) }
+  else { msg.className='text-red-400 text-sm text-center'; msg.textContent = d.error || 'Signing failed.' }
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/sign/submit — store e-signature
+app.post('/api/sign/submit', async (c) => {
+  const env = c.env
+  const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const token = await DB.prepare(`SELECT * FROM magic_tokens WHERE token = ? AND token_type = 'portal' AND expires_at > datetime('now')`).bind(body.token || '').first() as any
+  if (!token) return c.json({ error: 'Invalid session' }, 401)
+  if (!token.client_id) return c.json({ error: 'No client associated with session' }, 400)
+  const tmpl = await DB.prepare(`SELECT version FROM legal_template_versions WHERE template_type = ? AND is_active = 1`).bind(body.doc_type || '').first() as any
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('x-forwarded-for') || 'unknown'
+  const ua = c.req.header('user-agent') || ''
+  // Simple hash of signature + timestamp for audit
+  const hashInput = `${body.sig_data?.slice(0, 100)}_${Date.now()}_${ip}`
+  let hashHex = ''
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(hashInput))
+    hashHex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+  } catch (_) {}
+  await DB.prepare(`INSERT INTO e_signatures (client_id, document_type, document_version, signature_data, signature_method, ip_address, user_agent, hash) VALUES (?,?,?,?,?,?,?,?)`).bind(token.client_id, body.doc_type, tmpl?.version || '1.0', body.sig_data || '', body.sig_method || 'drawn', ip, ua, hashHex).run()
+  // Record consent for TCPA if communication_consent
+  if (body.doc_type === 'communication_consent') {
+    await DB.prepare(`INSERT INTO consent_records (client_id, consent_type, consented, consent_version, ip_address, user_agent, collected_via) VALUES (?,?,1,?,?,?,'web')`).bind(token.client_id, 'tcpa_sms', tmpl?.version || '1.0', ip, ua).run()
+    await DB.prepare(`INSERT INTO consent_records (client_id, consent_type, consented, consent_version, ip_address, user_agent, collected_via) VALUES (?,?,1,?,?,?,'web')`).bind(token.client_id, 'tcpa_call', tmpl?.version || '1.0', ip, ua).run()
+    await DB.prepare(`INSERT INTO consent_records (client_id, consent_type, consented, consent_version, ip_address, user_agent, collected_via) VALUES (?,?,1,?,?,?,'web')`).bind(token.client_id, 'tcpa_email', tmpl?.version || '1.0', ip, ua).run()
+  }
+  if (body.doc_type === 'croa_disclosure') await DB.prepare(`INSERT INTO consent_records (client_id, consent_type, consented, consent_version, ip_address, user_agent, collected_via) VALUES (?,?,1,?,?,?,'web')`).bind(token.client_id, 'croa_disclosure', tmpl?.version || '1.0', ip, ua).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind(token.email, 'document_signed', 'client', token.client_id, `Doc: ${body.doc_type} | Method: ${body.sig_method} | IP: ${ip} | Hash: ${hashHex.slice(0, 16)}...`).run()
+  return c.json({ success: true, hash: hashHex })
+})
+
+// GET /api/consent/:clientId — get all consent records
+app.get('/api/consent/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const consents = await DB.prepare(`SELECT * FROM consent_records WHERE client_id = ? ORDER BY created_at DESC`).bind(clientId).all()
+  const sigs = await DB.prepare(`SELECT document_type, document_version, signed_at, ip_address, hash, signature_method FROM e_signatures WHERE client_id = ? ORDER BY signed_at DESC`).bind(clientId).all()
+  return c.json({ consents: consents.results, signatures: sigs.results })
+})
+
+// POST /api/consent/record — manually record consent (staff)
+app.post('/api/consent/record', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id || !body.consent_type) return c.json({ error: 'client_id and consent_type required' }, 400)
+  await DB.prepare(`INSERT INTO consent_records (client_id, consent_type, consented, consent_text, consent_version, collected_via, witnessed_by) VALUES (?,?,?,?,?,?,?)`).bind(body.client_id, body.consent_type, body.consented ? 1 : 0, body.consent_text || null, body.version || '1.0', body.via || 'staff', body.witnessed_by || null).run()
+  return c.json({ success: true })
+})
+
+// ============================================================
+// FEATURE: DNC / OPT-OUT ENGINE
+// ============================================================
+
+app.get('/api/dnc', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const list = await DB.prepare(`SELECT d.*, cl.first_name, cl.last_name FROM dnc_list d LEFT JOIN clients cl ON cl.id = d.client_id ORDER BY d.created_at DESC LIMIT 200`).all()
+  return c.json({ dnc: list.results, total: list.results.length })
+})
+
+app.post('/api/dnc/add', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.phone) return c.json({ error: 'phone required' }, 400)
+  const phone = body.phone.replace(/\D/g, '').replace(/^1/, '')
+  await DB.prepare(`INSERT OR IGNORE INTO dnc_list (phone, client_id, reason, source, added_by) VALUES (?,?,?,?,?)`).bind(phone, body.client_id || null, body.reason || null, body.source || 'staff', body.added_by || 'staff').run()
+  if (body.client_id) {
+    await DB.prepare(`INSERT INTO opt_outs (client_id, phone, channel, reason, source) VALUES (?,?,?,?,?)`).bind(body.client_id, phone, 'call', body.reason || 'DNC request', body.source || 'staff').run()
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind(body.added_by || 'staff', 'dnc_added', 'client', body.client_id || 0, `Phone: ${phone}`).run()
+  }
+  return c.json({ success: true })
+})
+
+app.delete('/api/dnc/:phone', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const phone = c.req.param('phone').replace(/\D/g, '')
+  await DB.prepare(`DELETE FROM dnc_list WHERE phone = ?`).bind(phone).run()
+  return c.json({ success: true })
+})
+
+app.get('/api/dnc/check/:phone', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const phone = c.req.param('phone').replace(/\D/g, '').replace(/^1/, '')
+  const rec = await DB.prepare(`SELECT * FROM dnc_list WHERE phone = ?`).bind(phone).first()
+  return c.json({ on_dnc: !!rec, record: rec || null })
+})
+
+// ============================================================
+// FEATURE: AI AGENTS (7 agents)
+// ============================================================
+
+// POST /api/ai/intake — Intake Agent (first contact handler)
+app.post('/api/ai/intake', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const userMsg = body.message || ''
+  const clientId = body.client_id
+  const system = `You are a friendly, professional credit repair intake specialist at RJ Business Solutions. Your job is to:
+1. Warmly greet new prospects and explain the credit repair process.
+2. NEVER guarantee score increases or promise specific deletions.
+3. Explain that clients have rights under FCRA, FDCPA, and CROA.
+4. Collect the prospect's name, email, and phone to send a secure intake link.
+5. Answer basic questions about credit repair services.
+6. NEVER ask for payment upfront — our fees are compliant with CROA.
+7. Keep responses concise and encouraging but realistic.
+8. If asked about pricing, say plans start at competitive rates and they'll receive full pricing details in their intake package.`
+  const reply = await callAISimple(env, system, userMsg)
+  if (DB) {
+    const logClientId = clientId || null
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind('intake_agent', 'ai_intake_response', 'client', logClientId || 0, `User: ${userMsg.slice(0,100)} | Reply: ${reply.slice(0,100)}`).run()
+  }
+  return c.json({ success: true, agent: 'intake', reply })
+})
+
+// POST /api/ai/analyze — Credit Analysis Agent
+app.post('/api/ai/analyze', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const clientId = body.client_id
+  if (!clientId) return c.json({ error: 'client_id required' }, 400)
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(clientId).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const accounts = await DB.prepare(`SELECT * FROM credit_accounts WHERE client_id = ? ORDER BY is_negative DESC, balance DESC LIMIT 30`).bind(clientId).all()
+  const disputes = await DB.prepare(`SELECT * FROM disputes WHERE client_id = ? ORDER BY created_at DESC LIMIT 20`).bind(clientId).all()
+  const acctSummary = (accounts.results as any[]).map(a => `${a.creditor_name} (${a.bureau}): ${a.account_type}, Balance $${a.balance}, Status: ${a.account_status}, Negative: ${a.is_negative ? 'YES' : 'no'}, Collection: ${a.is_collection ? 'YES' : 'no'}, ChargeOff: ${a.is_charge_off ? 'YES' : 'no'}, Late30: ${a.late_30}, Late60: ${a.late_60}, Late90: ${a.late_90}`).join('\n')
+  const system = `You are an expert credit analyst. Analyze the client's credit profile and:
+1. Identify all negative items (collections, charge-offs, late payments, repos, bankruptcies, foreclosures).
+2. Flag Metro2 inconsistencies (e.g., wrong date of first delinquency, incorrect balance, duplicate accounts).
+3. Note high utilization (>30% bad, >50% urgent).
+4. Identify inquiry clustering.
+5. Find personal info errors.
+6. Prioritize actionable dispute opportunities by impact.
+7. NEVER guarantee specific outcomes. Be factual and specific.
+8. Format as a structured credit action plan.`
+  const userMsg = `Client: ${client.first_name} ${client.last_name} | Score: ${client.credit_score_current || 'unknown'} | Goal: ${client.credit_score_goal || 'not set'}\n\nAccounts:\n${acctSummary || 'No accounts parsed yet.'}\n\nExisting disputes: ${(disputes.results as any[]).length}`
+  const analysis = await callAISimple(env, system, userMsg)
+  await DB.prepare(`INSERT INTO ai_jobs (client_id, job_type, status, result, completed_at) VALUES (?,?,?,?,datetime('now'))`).bind(clientId, 'credit_analysis', 'completed', analysis).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind('credit_analysis_agent', 'ai_credit_analysis', 'client', clientId, `Analyzed ${(accounts.results as any[]).length} accounts`).run()
+  return c.json({ success: true, agent: 'credit_analysis', analysis, accounts_analyzed: (accounts.results as any[]).length })
+})
+
+// POST /api/ai/dispute-strategy — Dispute Strategy Agent
+app.post('/api/ai/dispute-strategy', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const clientId = body.client_id
+  const accountId = body.account_id
+  if (!clientId) return c.json({ error: 'client_id required' }, 400)
+  const account = accountId ? await DB.prepare(`SELECT * FROM credit_accounts WHERE id = ? AND client_id = ?`).bind(accountId, clientId).first() as any : null
+  const system = `You are an expert FCRA/FDCPA dispute strategist. For the given account, recommend the optimal dispute strategy:
+1. FCRA § 611 (bureau reinvestigation) — best for: errors, unverifiable data, Metro2 issues
+2. FCRA § 623 (furnisher direct dispute) — best for: factual inaccuracies the furnisher knows
+3. FDCPA § 809 (debt validation) — best for: collection accounts, unverified debts
+4. Goodwill deletion — best for: isolated late payments with otherwise good history
+5. Factual dispute — best for: wrong balance, wrong dates, wrong status
+6. Identity/mixed file — best for: not my account, identity theft
+7. Obsolete reporting — best for: items beyond 7-year (10 for bankruptcy) statute
+Output: Recommended strategy, specific dispute reason, sample dispute language, expected outcome range (realistic), timeline.
+NEVER guarantee deletion or score increase.`
+  const acctDesc = account ? `${account.creditor_name}, ${account.account_type}, Balance $${account.balance}, Status: ${account.account_status}, Open: ${account.open_date}, Late30: ${account.late_30}, ChargeOff: ${account.is_charge_off}` : body.account_description || 'Unknown account'
+  const strategy = await callAISimple(env, system, `Account: ${acctDesc}\nClient context: ${body.context || 'No additional context.'}`)
+  return c.json({ success: true, agent: 'dispute_strategy', strategy })
+})
+
+// POST /api/ai/compliance-review — Compliance Review Agent
+app.post('/api/ai/compliance-review', async (c) => {
+  const env = c.env
+  const body: any = await c.req.json().catch(() => ({}))
+  const content = body.content || ''
+  const contentType = body.type || 'message'
+  if (!content) return c.json({ error: 'content required' }, 400)
+  const system = `You are a strict compliance officer specializing in CROA, FCRA, FDCPA, TCPA, TSR, and CAN-SPAM. Review the given ${contentType} for compliance violations.
+
+Check for:
+1. CROA violations: guaranteed outcomes, advance fee requests, misleading service claims
+2. FCRA violations: false dispute claims, fabricated information
+3. FDCPA violations: harassment, false representations, unfair practices
+4. TCPA violations: missing opt-out instructions, sending without consent
+5. CAN-SPAM: missing unsubscribe, misleading subject lines
+6. AI guardrails: legal conclusions presented as fact, unauthorized practice of law
+7. TSR violations: telemarketing advance fee collection
+
+Output format:
+COMPLIANCE STATUS: [PASS/REVIEW NEEDED/FAIL]
+VIOLATIONS FOUND: [list or "None"]
+RISK LEVEL: [Low/Medium/High/Critical]
+RECOMMENDED CHANGES: [specific edits needed]
+CITATIONS: [applicable law references]`
+  const review = await callAISimple(env, system, `Review this ${contentType}:
+
+${content}`)
+  return c.json({ success: true, agent: 'compliance_review', review, content_type: contentType })
+})
+
+// POST /api/ai/client-update — Client Update Agent
+app.post('/api/ai/client-update', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const clientId = body.client_id
+  if (!clientId) return c.json({ error: 'client_id required' }, 400)
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(clientId).first() as any
+  if (!client) return c.json({ error: 'Client not found' }, 404)
+  const disputes = await DB.prepare(`SELECT * FROM disputes WHERE client_id = ? ORDER BY updated_at DESC LIMIT 10`).bind(clientId).all()
+  const pending = (disputes.results as any[]).filter(d => d.status === 'pending').length
+  const sent = (disputes.results as any[]).filter(d => d.status === 'sent').length
+  const resolved = (disputes.results as any[]).filter(d => ['deleted','updated','verified','closed'].includes(d.status)).length
+  const system = `You are a friendly credit repair case manager. Write a personalized status update for the client. Rules:
+1. Address them by first name.
+2. Summarize their dispute progress clearly.
+3. Give them their next action step.
+4. Be encouraging but realistic — NEVER promise results.
+5. Keep it under 150 words.
+6. Include relevant FCRA timeline reminders if disputes are outstanding.`
+  const update = await callAISimple(env, system, `Client: ${client.first_name} ${client.last_name} | Score: ${client.credit_score_current || 'not set'} | Total disputes: ${disputes.results.length} | Pending: ${pending} | Sent: ${sent} | Resolved: ${resolved} | Channel: ${body.channel || 'email'}`)
+  // Optionally auto-send
+  if (body.send && client.email) {
+    const sent2 = await sendEmail(env, client.email, `Your Credit Repair Update — ${env.COMPANY_NAME || 'RJ Business Solutions'}`, update)
+    return c.json({ success: true, agent: 'client_update', update, sent: sent2 })
+  }
+  return c.json({ success: true, agent: 'client_update', update })
+})
+
+// POST /api/ai/escalate — Escalation Agent
+app.post('/api/ai/escalate', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const clientId = body.client_id
+  const issue = body.issue || ''
+  if (!clientId || !issue) return c.json({ error: 'client_id and issue required' }, 400)
+  const system = `You are an escalation specialist for credit repair compliance. Given the client's unresolved issue, recommend the appropriate escalation path:
+1. CFPB Complaint — best for: CRA or furnisher violations, ignored disputes
+2. FTC Report — best for: fraud, ID theft, FDCPA violations
+3. State AG complaint — best for: state CROA violations, consumer fraud
+4. BBB complaint — best for: business practice issues
+5. Attorney referral — best for: FCRA/FDCPA statutory damages, willful violations
+6. Arbitration/mediation — best for: contractual disputes
+7. Small claims court prep — best for: small dollar FCRA/FDCPA violations
+Provide: recommended path(s), specific steps, template complaint language, realistic outcome.`
+  const escalation = await callAISimple(env, system, `Issue: ${issue}
+Client context: ${body.context || "None"}`)
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind('escalation_agent', 'ai_escalation', 'client', clientId, issue.slice(0, 200)).run()
+  return c.json({ success: true, agent: 'escalation', escalation })
+})
+
+// POST /api/ai/business-credit — Business Credit Agent
+app.post('/api/ai/business-credit', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const clientId = body.client_id
+  if (!clientId) return c.json({ error: 'client_id required' }, 400)
+  const profile = await DB.prepare(`SELECT * FROM business_credit_profiles WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(clientId).first() as any
+  const vendors = profile ? await DB.prepare(`SELECT * FROM vendor_accounts WHERE profile_id = ? ORDER BY tier, created_at`).bind(profile.id).all() : { results: [] }
+  const system = `You are a business credit expert specializing in EIN-based credit building. Create a roadmap:
+Tier 1: Starter accounts (no PG, easy approval) — Uline, Quill, Grainger, Crown Office Supplies
+Tier 2: Net 30 vendors — HD Supply, Summa Office Supplies, Reliable Office Supplies
+Tier 3: Fleet/gas cards — Wex Fleet, Fuelman, Shell Fleet
+Tier 4: Business credit cards — Capital One Spark, Chase Ink (after 2yr history)
+Output: Current tier status, next 3 recommended vendors, Paydex roadmap, DUNS/NAV tips, funding readiness score, timeline to no-PG funding.`
+  const context = profile ? `Business: ${profile.business_name} | EIN: ${profile.ein ? 'Yes' : 'No'} | DUNS: ${profile.duns_number || 'None'} | Paydex: ${profile.paydex_score || 'N/A'} | Tier: ${profile.funding_stage} | Vendors: ${(vendors.results as any[]).length}` : 'No business profile yet.'
+  const roadmap = await callAISimple(env, system, context)
+  return c.json({ success: true, agent: 'business_credit', roadmap })
+})
+
+// GET /api/ai/sessions — list recent AI job logs
+app.get('/api/ai/sessions', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const jobs = await DB.prepare(`SELECT aj.*, cl.first_name, cl.last_name FROM ai_jobs aj LEFT JOIN clients cl ON cl.id = aj.client_id ORDER BY aj.created_at DESC LIMIT 50`).all()
+  return c.json({ sessions: jobs.results })
+})
+
+app.get('/api/ai/sessions/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const jobs = await DB.prepare(`SELECT * FROM ai_jobs WHERE client_id = ? ORDER BY created_at DESC LIMIT 30`).bind(clientId).all()
+  return c.json({ sessions: jobs.results, client_id: clientId })
+})
+
+// ============================================================
+// FEATURE: CREDIT ACCOUNT MANAGEMENT (parsed data)
+// ============================================================
+
+app.get('/api/credit-accounts/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const accounts = await DB.prepare(`SELECT * FROM credit_accounts WHERE client_id = ? ORDER BY is_negative DESC, balance DESC`).bind(clientId).all()
+  return c.json({ accounts: accounts.results, total: accounts.results.length })
+})
+
+app.post('/api/credit-accounts', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id || !body.bureau || !body.creditor_name) return c.json({ error: 'client_id, bureau, creditor_name required' }, 400)
+  // Need a credit_report_id — find latest or create placeholder
+  let reportId = body.credit_report_id
+  if (!reportId) {
+    const rpt = await DB.prepare(`SELECT id FROM credit_reports WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(body.client_id).first() as any
+    if (rpt) { reportId = rpt.id } else {
+      const ins = await DB.prepare(`INSERT INTO credit_reports (client_id, report_type, pulled_by, status) VALUES (?,'US_3B','manual','active')`).bind(body.client_id).run()
+      reportId = ins.meta?.last_row_id
+    }
+  }
+  const ins = await DB.prepare(`INSERT INTO credit_accounts (credit_report_id, client_id, bureau, creditor_name, account_number, account_type, account_status, balance, credit_limit, monthly_payment, payment_status, open_date, close_date, late_30, late_60, late_90, is_negative, is_collection, is_charge_off, dispute_reason, metro2_issues) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(reportId, body.client_id, body.bureau, body.creditor_name, body.account_number || null, body.account_type || null, body.account_status || null, body.balance || 0, body.credit_limit || null, body.monthly_payment || null, body.payment_status || null, body.open_date || null, body.close_date || null, body.late_30 || 0, body.late_60 || 0, body.late_90 || 0, body.is_negative ? 1 : 0, body.is_collection ? 1 : 0, body.is_charge_off ? 1 : 0, body.dispute_reason || null, body.metro2_issues || null).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+app.put('/api/credit-accounts/:id', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const id = parseInt(c.req.param('id'))
+  const body: any = await c.req.json().catch(() => ({}))
+  const fields = ['creditor_name','account_type','account_status','balance','credit_limit','payment_status','late_30','late_60','late_90','is_negative','is_collection','is_charge_off','dispute_flag','dispute_reason','metro2_issues']
+  const updates: string[] = []; const vals: any[] = []
+  fields.forEach(f => { if (body[f] !== undefined) { updates.push(`${f} = ?`); vals.push(body[f]) } })
+  if (!updates.length) return c.json({ error: 'No fields to update' }, 400)
+  await DB.prepare(`UPDATE credit_accounts SET ${updates.join(', ')} WHERE id = ?`).bind(...vals, id).run()
+  return c.json({ success: true })
+})
+
+// ============================================================
+// FEATURE: DAILY COMPLIANCE ENGINE
+// ============================================================
+
+// POST /api/cron/compliance-check — runs daily, checks official sources
+app.post('/api/cron/compliance-check', async (c) => {
+  const env = c.env; const { DB } = env
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const start = Date.now()
+  const sources = await DB.prepare(`SELECT * FROM compliance_sources WHERE is_active = 1`).all()
+  let checked = 0, alertsCreated = 0
+  for (const source of sources.results as any[]) {
+    try {
+      const r = await fetch(source.source_url, { method: 'HEAD', headers: { 'User-Agent': 'RJBSComplianceBot/1.0' } })
+      await DB.prepare(`UPDATE compliance_sources SET last_checked_at = datetime('now') WHERE id = ?`).bind(source.id).run()
+      checked++
+      // Use AI to summarize any new compliance context (lightweight check)
+      if (env.OPENROUTER_API_KEY || env.GROQ_API_KEY || env.OPENAI_API_KEY) {
+        const summary = await callAISimple(env,
+          'You are a compliance monitoring assistant. Given a regulatory source name, generate a brief (2-3 sentence) reminder of the top current compliance risks in credit repair from that source. Be specific and cite relevant code sections.',
+          `Source: ${source.source_name} (${source.source_type})`)
+        if (summary && !summary.includes('unavailable')) {
+          await DB.prepare(`INSERT INTO compliance_updates (source_id, update_title, update_summary, update_url, update_category, severity, requires_review, status) VALUES (?,?,?,?,?,?,1,'pending')`).bind(source.id, `Daily Check: ${source.source_name}`, summary, source.source_url, source.source_type === 'cfpb' ? 'croa' : 'general', 'info').run()
+          alertsCreated++
+        }
+      }
+    } catch (_) {}
+  }
+  // Generate daily compliance alert
+  if (alertsCreated > 0) {
+    await DB.prepare(`INSERT INTO compliance_alerts (alert_type, severity, title, description) VALUES (?,?,?,?)`).bind('new_update', 'low', `Daily Compliance Digest — ${new Date().toLocaleDateString()}`, `Checked ${checked} sources, generated ${alertsCreated} compliance updates for review.`).run()
+  }
+  const duration = Date.now() - start
+  await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details) VALUES (?,?,?,?,?)`).bind('compliance_check', 'success', checked, duration, `Sources checked: ${checked}, Updates: ${alertsCreated}`).run()
+  return c.json({ success: true, sources_checked: checked, updates_created: alertsCreated, duration_ms: duration })
+})
+
+// GET /api/compliance/updates — list pending compliance updates
+app.get('/api/compliance/updates', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const status = c.req.query('status') || 'pending'
+  const updates = await DB.prepare(`SELECT cu.*, cs.source_name, cs.source_type FROM compliance_updates cu LEFT JOIN compliance_sources cs ON cs.id = cu.source_id WHERE cu.status = ? ORDER BY cu.detected_at DESC LIMIT 100`).bind(status).all()
+  return c.json({ updates: updates.results, total: updates.results.length })
+})
+
+// GET /api/compliance/digest — full daily digest
+app.get('/api/compliance/digest', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const today = new Date().toISOString().split('T')[0]
+  const updates = await DB.prepare(`SELECT * FROM compliance_updates WHERE detected_at >= ? ORDER BY severity DESC, detected_at DESC`).bind(today).all()
+  const alerts = await DB.prepare(`SELECT * FROM compliance_alerts WHERE status = 'open' ORDER BY severity DESC, created_at DESC`).all()
+  const rules = await DB.prepare(`SELECT * FROM compliance_rule_versions WHERE is_active = 1 ORDER BY rule_category, rule_code`).all()
+  return c.json({ date: today, updates: updates.results, open_alerts: alerts.results, active_rules: rules.results })
+})
+
+// POST /api/compliance/approve/:updateId — approve or reject a compliance update
+app.post('/api/compliance/approve/:updateId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const updateId = parseInt(c.req.param('updateId'))
+  const body: any = await c.req.json().catch(() => ({}))
+  const action = body.action === 'approve' ? 'approved' : 'rejected'
+  const reviewer = body.reviewer || 'admin'
+  await DB.prepare(`UPDATE compliance_updates SET status = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?`).bind(action, reviewer, updateId).run()
+  await DB.prepare(`INSERT INTO approval_logs (entity_type, entity_id, action, performed_by, notes) VALUES (?,?,?,?,?)`).bind('compliance_update', updateId, action, reviewer, body.notes || null).run()
+  return c.json({ success: true, action, update_id: updateId })
+})
+
+// GET /api/compliance/sources — list all compliance sources
+app.get('/api/compliance/sources', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const sources = await DB.prepare(`SELECT * FROM compliance_sources ORDER BY source_type, source_name`).all()
+  const rules = await DB.prepare(`SELECT * FROM compliance_rule_versions WHERE is_active = 1 ORDER BY rule_category, rule_code`).all()
+  return c.json({ sources: sources.results, active_rules: rules.results })
+})
+
+// GET /api/compliance/rules — get active rules
+app.get('/api/compliance/rules', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const cat = c.req.query('category')
+  const q = cat ? `SELECT * FROM compliance_rule_versions WHERE is_active = 1 AND rule_category = ? ORDER BY rule_code` : `SELECT * FROM compliance_rule_versions WHERE is_active = 1 ORDER BY rule_category, rule_code`
+  const rules = cat ? await DB.prepare(q).bind(cat).all() : await DB.prepare(q).all()
+  return c.json({ rules: rules.results })
+})
+
+// GET /api/compliance/alerts — get open compliance alerts
+app.get('/api/compliance/alerts', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const alerts = await DB.prepare(`SELECT * FROM compliance_alerts WHERE status = 'open' ORDER BY severity DESC, created_at DESC`).all()
+  return c.json({ alerts: alerts.results })
+})
+
+// ============================================================
+// FEATURE: CERTIFIED MAIL + DEADLINE TRACKING
+// ============================================================
+
+app.post('/api/mail/certified', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id || !body.recipient_name || !body.recipient_address) return c.json({ error: 'client_id, recipient_name, recipient_address required' }, 400)
+  const mailDate = body.mail_date || new Date().toISOString().split('T')[0]
+  // FCRA response deadline = 30 days from mail date
+  const deadline = new Date(new Date(mailDate).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+  const ins = await DB.prepare(`INSERT INTO certified_mail_records (client_id, dispute_id, recipient_name, recipient_address, bureau, tracking_number, mail_date, response_deadline, letter_type, notes) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(body.client_id, body.dispute_id || null, body.recipient_name, body.recipient_address, body.bureau || null, body.tracking_number || null, mailDate, deadline, body.letter_type || 'dispute', body.notes || null).run()
+  const mailId = ins.meta?.last_row_id
+  // Auto-create deadline record
+  await DB.prepare(`INSERT INTO deadlines (client_id, dispute_id, certified_mail_id, deadline_type, deadline_date, description) VALUES (?,?,?,?,?,?)`).bind(body.client_id, body.dispute_id || null, mailId, 'bureau_response', deadline, `${body.bureau || 'Bureau'} must respond to dispute mailed ${mailDate}`).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?,?,?,?,?)`).bind('staff', 'certified_mail_created', 'client', body.client_id, `To: ${body.recipient_name}, Tracking: ${body.tracking_number || 'pending'}, Deadline: ${deadline}`).run()
+  return c.json({ success: true, id: mailId, response_deadline: deadline })
+})
+
+app.get('/api/mail/certified/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const records = await DB.prepare(`SELECT * FROM certified_mail_records WHERE client_id = ? ORDER BY mail_date DESC`).bind(clientId).all()
+  return c.json({ records: records.results })
+})
+
+app.put('/api/mail/certified/:id/status', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const id = parseInt(c.req.param('id'))
+  const body: any = await c.req.json().catch(() => ({}))
+  const deliveryStatus = body.delivery_status || 'in_transit'
+  await DB.prepare(`UPDATE certified_mail_records SET delivery_status = ?, delivery_date = ?, tracking_number = COALESCE(?, tracking_number), updated_at = datetime('now') WHERE id = ?`).bind(deliveryStatus, body.delivery_date || null, body.tracking_number || null, id).run()
+  const mail = await DB.prepare(`SELECT * FROM certified_mail_records WHERE id = ?`).bind(id).first() as any
+  if (mail && deliveryStatus === 'delivered') {
+    await DB.prepare(`UPDATE deadlines SET status = 'open', description = description || ' [DELIVERED]' WHERE certified_mail_id = ?`).bind(id).run()
+  }
+  return c.json({ success: true, status: deliveryStatus })
+})
+
+app.get('/api/deadlines/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const deadlines = await DB.prepare(`SELECT d.*, cm.tracking_number, cm.recipient_name FROM deadlines d LEFT JOIN certified_mail_records cm ON cm.id = d.certified_mail_id WHERE d.client_id = ? ORDER BY d.deadline_date ASC`).bind(clientId).all()
+  const now = new Date().toISOString().split('T')[0]
+  const enriched = (deadlines.results as any[]).map(d => ({ ...d, is_overdue: d.deadline_date < now && d.status === 'open', days_remaining: Math.ceil((new Date(d.deadline_date).getTime() - Date.now()) / 86400000) }))
+  return c.json({ deadlines: enriched, overdue: enriched.filter(d => d.is_overdue).length })
+})
+
+app.post('/api/deadlines', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id || !body.deadline_type || !body.deadline_date) return c.json({ error: 'client_id, deadline_type, deadline_date required' }, 400)
+  const ins = await DB.prepare(`INSERT INTO deadlines (client_id, dispute_id, deadline_type, deadline_date, description) VALUES (?,?,?,?,?)`).bind(body.client_id, body.dispute_id || null, body.deadline_type, body.deadline_date, body.description || null).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+// ============================================================
+// FEATURE: CALL CENTER + VOICE AI
+// ============================================================
+
+// GET /call-center — SSR call center dashboard
+app.get('/call-center', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const calls = await DB.prepare(`SELECT cr.*, cl.first_name, cl.last_name, cl.phone FROM call_recordings cr LEFT JOIN clients cl ON cl.id = cr.client_id ORDER BY cr.created_at DESC LIMIT 50`).all()
+  const dnc = await DB.prepare(`SELECT COUNT(*) as cnt FROM dnc_list`).first() as any
+  const today = new Date().toISOString().split('T')[0]
+  const todayCalls = await DB.prepare(`SELECT COUNT(*) as cnt FROM call_recordings WHERE created_at >= ?`).bind(today).first() as any
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Call Center — ${company}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-950 text-white min-h-screen">
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4">
+  <a href="/" class="text-blue-400 hover:text-white font-semibold">← Dashboard</a>
+  <span class="text-gray-400">/</span>
+  <span class="text-white font-medium">Call Center</span>
+</nav>
+<div class="p-6 max-w-6xl mx-auto">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">Call Center Dashboard</h1>
+    <a href="/api/twilio/voice" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-xl text-sm font-medium">+ Log Call</a>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Today's Calls</p><p class="text-2xl font-bold text-blue-400">${todayCalls?.cnt || 0}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Total Logged</p><p class="text-2xl font-bold text-purple-400">${(calls.results as any[]).length}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">DNC List</p><p class="text-2xl font-bold text-red-400">${dnc?.cnt || 0}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Twilio Status</p><p class="text-sm font-medium ${env.TWILIO_ACCOUNT_SID ? 'text-green-400' : 'text-yellow-400'}">${env.TWILIO_ACCOUNT_SID ? '✓ Connected' : '⚠ Keys needed'}</p></div>
+  </div>
+  <div class="bg-gray-900 rounded-xl p-4 mb-6">
+    <h2 class="font-semibold mb-3 text-gray-200">Quick Outbound Call</h2>
+    <div class="flex gap-3">
+      <input id="call-phone" type="tel" placeholder="+15055550100" class="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <input id="call-client" type="number" placeholder="Client ID" class="w-28 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <select id="call-type" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
+        <option value="support">Support</option><option value="intake">Intake</option><option value="follow_up">Follow-up</option><option value="dispute_update">Dispute Update</option>
+      </select>
+      <button onclick="startCall()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Call</button>
+    </div>
+    <p id="call-msg" class="text-sm mt-2 hidden"></p>
+  </div>
+  <div class="bg-gray-900 rounded-xl overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+      <h2 class="font-semibold text-gray-200">Recent Calls</h2>
+      <a href="/api/dnc" class="text-xs text-red-400 hover:text-red-300">DNC List →</a>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="border-b border-gray-800 text-gray-400 text-xs"><th class="px-4 py-2 text-left">Client</th><th class="px-4 py-2 text-left">From</th><th class="px-4 py-2 text-left">To</th><th class="px-4 py-2 text-left">Type</th><th class="px-4 py-2 text-left">Duration</th><th class="px-4 py-2 text-left">Status</th><th class="px-4 py-2 text-left">Date</th></tr></thead>
+        <tbody>
+          ${(calls.results as any[]).map(call => `<tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+            <td class="px-4 py-2">${call.first_name ? `<a href="/clients/${call.client_id}" class="text-blue-400 hover:underline">${call.first_name} ${call.last_name}</a>` : '<span class="text-gray-500">Unknown</span>'}</td>
+            <td class="px-4 py-2 text-gray-300 font-mono text-xs">${call.from_number || '—'}</td>
+            <td class="px-4 py-2 text-gray-300 font-mono text-xs">${call.to_number || '—'}</td>
+            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs bg-gray-700 text-gray-300">${call.call_type}</span></td>
+            <td class="px-4 py-2 text-gray-300">${call.duration_seconds ? Math.floor(call.duration_seconds/60)+'m '+((call.duration_seconds%60)+'s') : '—'}</td>
+            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs ${call.status === 'completed' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${call.status}</span></td>
+            <td class="px-4 py-2 text-gray-400 text-xs">${call.created_at?.slice(0,16) || ''}</td>
+          </tr>`).join('') || '<tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">No calls logged yet</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+async function startCall() {
+  const phone = document.getElementById('call-phone').value
+  const clientId = document.getElementById('call-client').value
+  const callType = document.getElementById('call-type').value
+  const msg = document.getElementById('call-msg')
+  if (!phone) { msg.className='text-red-400 text-sm'; msg.textContent='Phone required.'; msg.classList.remove('hidden'); return }
+  const r = await fetch('/api/calls/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ to: phone, client_id: clientId || null, call_type: callType }) })
+  const d = await r.json()
+  msg.className = d.success ? 'text-green-400 text-sm' : 'text-red-400 text-sm'
+  msg.textContent = d.success ? '✓ Call initiated' : (d.error || 'Failed')
+  msg.classList.remove('hidden')
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/calls/start — initiate outbound call via Twilio
+app.post('/api/calls/start', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.to) return c.json({ error: 'to (phone) required' }, 400)
+  // Check DNC
+  const cleanPhone = body.to.replace(/\D/g, '').replace(/^1/, '')
+  const onDNC = await DB.prepare(`SELECT id FROM dnc_list WHERE phone = ?`).bind(cleanPhone).first()
+  if (onDNC) return c.json({ error: 'This number is on the Do Not Call list.', on_dnc: true }, 403)
+  // Log the call attempt
+  const ins = await DB.prepare(`INSERT INTO call_recordings (client_id, from_number, to_number, direction, status, call_type) VALUES (?,?,?,?,?,?)`).bind(body.client_id || null, env.TWILIO_PHONE_NUMBER || 'unknown', body.to, 'outbound', 'initiated', body.call_type || 'support').run()
+  // Initiate via Twilio if keys present
+  if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER) {
+    const creds = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)
+    const voiceUrl = env.TWILIO_VOICE_WEBHOOK_URL || `${env.APP_BASE_URL || 'https://example.com'}/api/twilio/voice`
+    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Calls.json`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ From: env.TWILIO_PHONE_NUMBER, To: body.to, Url: voiceUrl, StatusCallback: `${env.APP_BASE_URL || ''}/api/twilio/voice-status`, StatusCallbackMethod: 'POST' })
+    })
+    const d: any = await r.json()
+    if (d.sid) await DB.prepare(`UPDATE call_recordings SET call_sid = ?, status = 'ringing' WHERE id = ?`).bind(d.sid, ins.meta?.last_row_id).run()
+    return c.json({ success: r.ok, call_sid: d.sid, id: ins.meta?.last_row_id })
+  }
+  return c.json({ success: true, id: ins.meta?.last_row_id, note: 'Logged only — Twilio keys needed for live calls' })
+})
+
+// POST /api/twilio/voice — TwiML handler for incoming/outbound calls
+app.post('/api/twilio/voice', async (c) => {
+  const env = c.env; const { DB } = env
+  const body = await c.req.formData().catch(() => null)
+  const from = body?.get('From') as string || ''
+  const callSid = body?.get('CallSid') as string || ''
+  const stateAbbr = body?.get('CallerState') as string || ''
+  // Check recording consent by state (2-party consent states)
+  const twoPartyStates = ['CA','CT','FL','IL','MA','MD','MI','MO','MT','NH','OR','PA','WA']
+  const needsTwoParty = twoPartyStates.includes(stateAbbr)
+  // Log the call
+  if (DB && from) {
+    const client = await DB.prepare(`SELECT id FROM clients WHERE phone = ?`).bind(from).first() as any
+    await DB.prepare(`INSERT OR IGNORE INTO call_recordings (client_id, call_sid, from_number, to_number, direction, status, call_type, consent_given, consent_method) VALUES (?,?,?,?,?,?,?,?,?)`).bind(client?.id || null, callSid, from, env.TWILIO_PHONE_NUMBER || '', 'inbound', 'in-progress', 'support', needsTwoParty ? 0 : 1, needsTwoParty ? 'pending' : 'single_party').run()
+  }
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const recordConsent = needsTwoParty
+    ? `<Say>This call may be recorded for quality and compliance purposes. By continuing, you consent to recording.</Say>`
+    : ''
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response>${recordConsent}<Say voice="Polly.Joanna">Thank you for calling ${company}. Our team will be with you shortly. Please hold while we connect your call.</Say><Enqueue waitUrl="/api/twilio/voice-wait" workflowSid="">support</Enqueue></Response>`
+  return new Response(twiml, { headers: { 'Content-Type': 'text/xml' } })
+})
+
+// POST /api/twilio/voice-status — Twilio call status callback
+app.post('/api/twilio/voice-status', async (c) => {
+  const env = c.env; const { DB } = env
+  const body = await c.req.formData().catch(() => null)
+  if (!body || !DB) return c.json({ ok: true })
+  const callSid = body.get('CallSid') as string
+  const status = body.get('CallStatus') as string
+  const duration = body.get('CallDuration') as string
+  const recordingUrl = body.get('RecordingUrl') as string
+  const recordingSid = body.get('RecordingSid') as string
+  await DB.prepare(`UPDATE call_recordings SET status = ?, duration_seconds = ?, recording_url = ?, recording_sid = ? WHERE call_sid = ?`).bind(status, duration ? parseInt(duration) : null, recordingUrl || null, recordingSid || null, callSid).run()
+  return c.json({ ok: true })
+})
+
+app.get('/api/calls/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const calls = await DB.prepare(`SELECT * FROM call_recordings WHERE client_id = ? ORDER BY created_at DESC`).bind(clientId).all()
+  return c.json({ calls: calls.results })
+})
+
+// ============================================================
+// FEATURE: BUSINESS CREDIT ROADMAP
+// ============================================================
+
+// GET /business-credit/:clientId — SSR roadmap page
+app.get('/business-credit/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const client = await DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(clientId).first() as any
+  if (!client) return c.html('<h1>Client not found</h1>', 404)
+  const profile = await DB.prepare(`SELECT * FROM business_credit_profiles WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(clientId).first() as any
+  const vendors = profile ? await DB.prepare(`SELECT * FROM vendor_accounts WHERE profile_id = ? ORDER BY tier, status`).bind(profile.id).all() : { results: [] }
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const tierColors = ['','bg-blue-900/30 border-blue-500/30','bg-purple-900/30 border-purple-500/30','bg-orange-900/30 border-orange-500/30','bg-green-900/30 border-green-500/30']
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Business Credit — ${client.first_name} ${client.last_name}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-950 text-white min-h-screen">
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4">
+  <a href="/clients/${clientId}" class="text-blue-400 hover:text-white font-semibold">← ${client.first_name} ${client.last_name}</a>
+  <span class="text-gray-400">/</span>
+  <span class="text-white font-medium">Business Credit Roadmap</span>
+</nav>
+<div class="p-6 max-w-4xl mx-auto">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">Business Credit Roadmap</h1>
+    <button onclick="document.getElementById('profile-modal').classList.remove('hidden')" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">${profile ? 'Edit Profile' : '+ Create Profile'}</button>
+  </div>
+  ${profile ? `
+  <div class="bg-gray-900 rounded-2xl p-6 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+      <div><p class="text-gray-400 text-xs mb-1">Business</p><p class="font-semibold">${profile.business_name}</p></div>
+      <div><p class="text-gray-400 text-xs mb-1">EIN</p><p class="font-semibold">${profile.ein ? '✓ On File' : '⚠ Needed'}</p></div>
+      <div><p class="text-gray-400 text-xs mb-1">DUNS</p><p class="font-semibold">${profile.duns_number || '⚠ Not set'}</p></div>
+      <div><p class="text-gray-400 text-xs mb-1">Paydex Score</p><p class="font-bold text-2xl ${(profile.paydex_score || 0) >= 80 ? 'text-green-400' : (profile.paydex_score || 0) >= 60 ? 'text-yellow-400' : 'text-red-400'}">${profile.paydex_score || '—'}</p></div>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-gray-400 text-sm">Funding Stage:</span>
+      ${['tier1','tier2','tier3','tier4','ready'].map(t => `<span class="px-2 py-0.5 rounded-full text-xs ${t === profile.funding_stage ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}">${t}</span>`).join('')}
+    </div>
+  </div>
+  <div class="mb-6">
+    <h2 class="text-lg font-semibold mb-4">Vendor Accounts (${(vendors.results as any[]).length})</h2>
+    ${[1,2,3,4].map(tier => {
+      const tierVendors = (vendors.results as any[]).filter(v => v.tier === tier)
+      return `<div class="border ${tierColors[tier]} rounded-xl p-4 mb-3">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-medium">Tier ${tier} ${['','Starter Net30s','Net30 Vendors','Fleet/Gas Cards','Business Credit Cards'][tier]}</h3>
+          <button onclick="addVendor(${tier})" class="text-xs text-blue-400 hover:text-blue-300">+ Add Vendor</button>
+        </div>
+        ${tierVendors.length ? `<div class="space-y-2">${tierVendors.map(v => `<div class="flex items-center justify-between bg-gray-900/50 rounded-lg px-3 py-2"><div><p class="text-sm font-medium">${v.vendor_name}</p><p class="text-xs text-gray-400">${v.account_type} ${v.credit_limit ? '| Limit: $'+v.credit_limit : ''} ${v.reports_to ? '| Reports to: '+v.reports_to : ''}</p></div><span class="px-2 py-0.5 rounded-full text-xs ${v.status === 'active' ? 'bg-green-900/50 text-green-400' : v.status === 'applied' ? 'bg-yellow-900/50 text-yellow-400' : 'bg-gray-700 text-gray-300'}">${v.status}</span></div>`).join('')}</div>` : `<p class="text-gray-500 text-sm">No Tier ${tier} accounts yet</p>`}
+      </div>`
+    }).join('')}
+  </div>` : `<div class="bg-gray-900 rounded-2xl p-8 text-center mb-6"><p class="text-gray-400 mb-4">No business credit profile yet.</p><button onclick="document.getElementById('profile-modal').classList.remove('hidden')" class="px-6 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm">Create Business Profile →</button></div>`}
+  <div class="bg-gray-900 rounded-2xl p-6">
+    <h2 class="font-semibold mb-3 text-gray-200">Get AI Business Credit Roadmap</h2>
+    <button onclick="getAIRoadmap()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-xl text-sm font-medium mb-3">Generate AI Roadmap</button>
+    <div id="roadmap-output" class="text-sm text-gray-300 whitespace-pre-wrap bg-gray-800 rounded-xl p-4 hidden"></div>
+  </div>
+</div>
+<!-- Profile Modal -->
+<div id="profile-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+  <div class="bg-gray-900 rounded-2xl p-6 w-full max-w-md">
+    <h3 class="text-lg font-bold mb-4">${profile ? 'Edit' : 'Create'} Business Profile</h3>
+    <div class="space-y-3">
+      <input id="biz-name" type="text" value="${profile?.business_name || ''}" placeholder="Business Legal Name" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <input id="biz-ein" type="text" value="${profile?.ein || ''}" placeholder="EIN (XX-XXXXXXX)" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <input id="biz-duns" type="text" value="${profile?.duns_number || ''}" placeholder="DUNS Number" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <input id="biz-paydex" type="number" value="${profile?.paydex_score || ''}" placeholder="Paydex Score (0-100)" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <input id="biz-type" type="text" value="${profile?.business_type || ''}" placeholder="Business Type (LLC, Corp, etc)" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      <div class="flex gap-2">
+        <button onclick="saveProfile()" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Save Profile</button>
+        <button onclick="document.getElementById('profile-modal').classList.add('hidden')" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 rounded-xl text-sm">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+async function saveProfile() {
+  const r = await fetch('/api/business-credit/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ client_id: ${clientId}, business_name: document.getElementById('biz-name').value, ein: document.getElementById('biz-ein').value, duns_number: document.getElementById('biz-duns').value, paydex_score: document.getElementById('biz-paydex').value || null, business_type: document.getElementById('biz-type').value }) })
+  if (r.ok) location.reload()
+}
+function addVendor(tier) {
+  const name = prompt('Vendor name?')
+  if (!name) return
+  const type = prompt('Account type? (net30/net60/revolving/secured)', 'net30')
+  const reports = prompt('Reports to? (experian/equifax/transunion/dun_bradstreet/all)', 'all')
+  fetch('/api/business-credit/vendor', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ profile_id: ${profile?.id || 0}, vendor_name: name, account_type: type || 'net30', reports_to: reports, tier, status: 'applied' }) }).then(() => location.reload())
+}
+async function getAIRoadmap() {
+  const out = document.getElementById('roadmap-output')
+  out.textContent = 'Generating roadmap...'
+  out.classList.remove('hidden')
+  const r = await fetch('/api/ai/business-credit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ client_id: ${clientId} }) })
+  const d = await r.json()
+  out.textContent = d.roadmap || d.error || 'No response.'
+}
+</script>
+</body></html>`)
+})
+
+app.get('/api/business-credit/profile/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const profile = await DB.prepare(`SELECT * FROM business_credit_profiles WHERE client_id = ?`).bind(clientId).first()
+  if (!profile) return c.json({ error: 'No business credit profile found' }, 404)
+  const vendors = await DB.prepare(`SELECT * FROM vendor_accounts WHERE profile_id = ? ORDER BY created_at DESC`).bind((profile as any).id).all()
+  return c.json({ profile, vendors: vendors.results })
+})
+
+app.post('/api/business-credit/profile', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id || !body.business_name) return c.json({ error: 'client_id and business_name required' }, 400)
+  const existing = await DB.prepare(`SELECT id FROM business_credit_profiles WHERE client_id = ?`).bind(body.client_id).first() as any
+  if (existing) {
+    await DB.prepare(`UPDATE business_credit_profiles SET business_name=?, ein=?, duns_number=?, nav_score=?, paydex_score=?, business_type=?, funding_stage=COALESCE(?,funding_stage), updated_at=datetime('now') WHERE id=?`).bind(body.business_name, body.ein||null, body.duns_number||null, body.nav_score||null, body.paydex_score||null, body.business_type||null, body.funding_stage||null, existing.id).run()
+    return c.json({ success: true, id: existing.id, updated: true })
+  }
+  const ins = await DB.prepare(`INSERT INTO business_credit_profiles (client_id, business_name, ein, duns_number, nav_score, paydex_score, business_type, state_incorporated, date_incorporated, funding_stage) VALUES (?,?,?,?,?,?,?,?,?,'tier1')`).bind(body.client_id, body.business_name, body.ein||null, body.duns_number||null, body.nav_score||null, body.paydex_score||null, body.business_type||null, body.state_incorporated||null, body.date_incorporated||null).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+app.post('/api/business-credit/vendor', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.profile_id || !body.vendor_name) return c.json({ error: 'profile_id and vendor_name required' }, 400)
+  const ins = await DB.prepare(`INSERT INTO vendor_accounts (profile_id, vendor_name, account_type, credit_limit, payment_terms, reports_to, tier, account_number, open_date, status, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(body.profile_id, body.vendor_name, body.account_type||'net30', body.credit_limit||null, body.payment_terms||null, body.reports_to||null, body.tier||1, body.account_number||null, body.open_date||null, body.status||'applied', body.notes||null).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+app.get('/api/business-credit/vendors/:profileId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const profileId = parseInt(c.req.param('profileId'))
+  const vendors = await DB.prepare(`SELECT * FROM vendor_accounts WHERE profile_id = ? ORDER BY tier, status`).bind(profileId).all()
+  return c.json({ vendors: vendors.results })
+})
+
+app.put('/api/business-credit/vendor/:id', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const id = parseInt(c.req.param('id'))
+  const body: any = await c.req.json().catch(() => ({}))
+  const fields = ['vendor_name','account_type','credit_limit','balance','payment_terms','reports_to','tier','status','on_time_payments','late_payments','notes']
+  const updates: string[] = ["updated_at = datetime('now')"]; const vals: any[] = []
+  fields.forEach(f => { if (body[f] !== undefined) { updates.push(`${f} = ?`); vals.push(body[f]) } })
+  await DB.prepare(`UPDATE vendor_accounts SET ${updates.join(', ')} WHERE id = ?`).bind(...vals, id).run()
+  return c.json({ success: true })
+})
+
+// ============================================================
+// FEATURE: COMPLIANCE CENTER PAGE
+// ============================================================
+
+app.get('/compliance-center', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const updates = await DB.prepare(`SELECT cu.*, cs.source_name FROM compliance_updates cu LEFT JOIN compliance_sources cs ON cs.id = cu.source_id ORDER BY cu.detected_at DESC LIMIT 30`).all()
+  const alerts = await DB.prepare(`SELECT * FROM compliance_alerts WHERE status = 'open' ORDER BY severity DESC LIMIT 20`).all()
+  const rules = await DB.prepare(`SELECT * FROM compliance_rule_versions WHERE is_active = 1 ORDER BY rule_category, rule_code`).all()
+  const sources = await DB.prepare(`SELECT * FROM compliance_sources ORDER BY source_type`).all()
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const severityColor: Record<string, string> = { critical:'bg-red-900/50 text-red-400', high:'bg-orange-900/50 text-orange-400', medium:'bg-yellow-900/50 text-yellow-400', low:'bg-blue-900/50 text-blue-400', info:'bg-gray-700 text-gray-300' }
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Compliance Center — ${company}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-950 text-white min-h-screen">
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4">
+  <a href="/" class="text-blue-400 hover:text-white font-semibold">← Dashboard</a>
+  <span class="text-gray-400">/</span><span class="text-white font-medium">Compliance Center</span>
+</nav>
+<div class="p-6 max-w-6xl mx-auto">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">Compliance Center</h1>
+    <button onclick="runCheck()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Run Compliance Check</button>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Active Rules</p><p class="text-2xl font-bold text-blue-400">${(rules.results as any[]).length}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Open Alerts</p><p class="text-2xl font-bold text-yellow-400">${(alerts.results as any[]).length}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Pending Updates</p><p class="text-2xl font-bold text-orange-400">${(updates.results as any[]).filter((u: any) => u.status === 'pending').length}</p></div>
+    <div class="bg-gray-900 rounded-xl p-4"><p class="text-gray-400 text-xs mb-1">Sources Monitored</p><p class="text-2xl font-bold text-green-400">${(sources.results as any[]).length}</p></div>
+  </div>
+  ${(alerts.results as any[]).length ? `<div class="bg-gray-900 rounded-2xl p-4 mb-6">
+    <h2 class="font-semibold mb-3 text-red-400">⚠ Open Compliance Alerts</h2>
+    <div class="space-y-2">${(alerts.results as any[]).map(a => `<div class="flex items-center justify-between p-3 bg-gray-800 rounded-xl"><div><p class="text-sm font-medium">${a.title}</p><p class="text-xs text-gray-400">${a.description || ''}</p></div><div class="flex items-center gap-2"><span class="px-2 py-0.5 rounded-full text-xs ${severityColor[a.severity] || 'bg-gray-700 text-gray-300'}">${a.severity}</span><button onclick="resolveAlert(${a.id})" class="text-xs text-gray-400 hover:text-white">Resolve</button></div></div>`).join('')}</div>
+  </div>` : ''}
+  <div class="bg-gray-900 rounded-2xl p-4 mb-6">
+    <h2 class="font-semibold mb-3">Compliance Updates (Last 30)</h2>
+    <div class="space-y-2">${(updates.results as any[]).map(u => `<div class="flex items-start justify-between p-3 bg-gray-800 rounded-xl"><div class="flex-1 mr-4"><p class="text-sm font-medium">${u.update_title}</p><p class="text-xs text-gray-400 mt-0.5">${u.source_name || ''} · ${u.detected_at?.slice(0,10) || ''}</p>${u.update_summary ? `<p class="text-xs text-gray-300 mt-1">${u.update_summary.slice(0,150)}...</p>` : ''}</div><div class="flex items-center gap-2 flex-shrink-0">${u.status === 'pending' ? `<button onclick="approveUpdate(${u.id},'approve')" class="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs">Approve</button><button onclick="approveUpdate(${u.id},'reject')" class="px-2 py-1 bg-red-800 hover:bg-red-700 rounded text-xs">Reject</button>` : `<span class="px-2 py-0.5 rounded-full text-xs bg-gray-700 text-gray-300">${u.status}</span>`}</div></div>`).join('') || '<p class="text-gray-500 text-sm text-center py-4">No updates yet — run a compliance check</p>'}</div>
+  </div>
+  <div class="bg-gray-900 rounded-2xl p-4 mb-6">
+    <h2 class="font-semibold mb-3">Active Compliance Rules (${(rules.results as any[]).length})</h2>
+    <div class="space-y-2">${Object.entries((rules.results as any[]).reduce((acc: any, r: any) => { if (!acc[r.rule_category]) acc[r.rule_category] = []; acc[r.rule_category].push(r); return acc }, {})).map(([cat, catRules]: [string, any]) => `<div><p class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">${cat}</p>${(catRules as any[]).map(r => `<div class="p-2 bg-gray-800 rounded-lg mb-1"><p class="text-sm font-medium">${r.rule_code} — ${r.rule_name}</p><p class="text-xs text-gray-400">${r.source_citation || ''}</p></div>`).join('')}</div>`).join('')}</div>
+  </div>
+  <div class="bg-gray-900 rounded-2xl p-4">
+    <h2 class="font-semibold mb-3">Monitored Sources</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">${(sources.results as any[]).map(s => `<div class="flex items-center justify-between p-3 bg-gray-800 rounded-xl"><div><p class="text-sm font-medium">${s.source_name}</p><p class="text-xs text-gray-400">${s.source_url.slice(0,50)}...</p></div><div class="text-right"><span class="text-xs text-gray-400">${s.last_checked_at ? 'Checked: '+s.last_checked_at.slice(0,10) : 'Not checked'}</span></div></div>`).join('')}</div>
+  </div>
+  <div id="run-msg" class="mt-4 text-sm text-center hidden"></div>
+</div>
+<script>
+async function runCheck() {
+  const msg = document.getElementById('run-msg')
+  msg.className='text-blue-400 text-sm text-center'; msg.textContent='Running compliance check...'; msg.classList.remove('hidden')
+  const r = await fetch('/api/cron/compliance-check', { method:'POST' })
+  const d = await r.json()
+  if (d.success) { msg.className='text-green-400 text-sm text-center'; msg.textContent=\`✓ Checked \${d.sources_checked} sources, \${d.updates_created} updates created.\`; setTimeout(() => location.reload(), 2000) }
+  else { msg.className='text-red-400 text-sm text-center'; msg.textContent=d.error||'Failed' }
+}
+async function approveUpdate(id, action) {
+  await fetch(\`/api/compliance/approve/\${id}\`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action, reviewer:'admin' }) })
+  location.reload()
+}
+async function resolveAlert(id) {
+  await fetch(\`/api/compliance/alerts/\${id}/resolve\`, { method:'POST' })
+  location.reload()
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/compliance/alerts/:id/resolve
+app.post('/api/compliance/alerts/:id/resolve', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const id = parseInt(c.req.param('id'))
+  await DB.prepare(`UPDATE compliance_alerts SET status = 'resolved', resolved_at = datetime('now'), resolved_by = 'admin' WHERE id = ?`).bind(id).run()
+  return c.json({ success: true })
+})
+
+// ============================================================
+// FEATURE: FULL AUDIT LOG PAGE
+// ============================================================
+
+app.get('/audit-log', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const page = parseInt(c.req.query('page') || '1')
+  const limit = 50
+  const offset = (page - 1) * limit
+  const clientFilter = c.req.query('client_id')
+  const actionFilter = c.req.query('action')
+  let q = `SELECT al.* FROM audit_log al WHERE 1=1`
+  const params: any[] = []
+  if (clientFilter) { q += ` AND al.entity_id = ? AND al.entity_type = 'client'`; params.push(parseInt(clientFilter)) }
+  if (actionFilter) { q += ` AND al.action LIKE ?`; params.push(`%${actionFilter}%`) }
+  q += ` ORDER BY al.created_at DESC LIMIT ${limit} OFFSET ${offset}`
+  const logs = await DB.prepare(q).bind(...params).all()
+  const total = await DB.prepare(`SELECT COUNT(*) as cnt FROM audit_log`).first() as any
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Audit Log — ${company}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-950 text-white min-h-screen">
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4">
+  <a href="/" class="text-blue-400 hover:text-white font-semibold">← Dashboard</a>
+  <span class="text-gray-400">/</span><span class="text-white font-medium">Audit Log</span>
+  <div class="ml-auto flex gap-2">
+    <a href="/api/export/audit-log" class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm">Export CSV</a>
+  </div>
+</nav>
+<div class="p-6 max-w-6xl mx-auto">
+  <div class="flex items-center justify-between mb-4">
+    <h1 class="text-2xl font-bold">Audit Log <span class="text-gray-500 text-lg font-normal">(${total?.cnt || 0} total entries)</span></h1>
+  </div>
+  <div class="flex gap-3 mb-4">
+    <input type="text" id="client-filter" placeholder="Client ID" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500 w-28">
+    <input type="text" id="action-filter" placeholder="Filter by action..." class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500 flex-1">
+    <button onclick="applyFilter()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Filter</button>
+    <a href="/audit-log" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-xl text-sm">Clear</a>
+  </div>
+  <div class="bg-gray-900 rounded-2xl overflow-hidden">
+    <table class="w-full text-sm">
+      <thead><tr class="border-b border-gray-800 text-gray-400 text-xs"><th class="px-4 py-3 text-left">Time</th><th class="px-4 py-3 text-left">Entity</th><th class="px-4 py-3 text-left">Action</th><th class="px-4 py-3 text-left">Actor</th><th class="px-4 py-3 text-left">Details</th></tr></thead>
+      <tbody>
+        ${(logs.results as any[]).map(log => `<tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+          <td class="px-4 py-2 text-gray-400 text-xs whitespace-nowrap">${log.created_at?.slice(0,16) || ''}</td>
+          <td class="px-4 py-2">${log.entity_type === 'client' && log.entity_id ? `<a href="/clients/${log.entity_id}" class="text-blue-400 hover:underline text-xs">${log.entity_type} #${log.entity_id}</a>` : `<span class="text-gray-400 text-xs">${log.entity_type || '—'} ${log.entity_id ? '#'+log.entity_id : ''}</span>`}</td>
+          <td class="px-4 py-2"><span class="px-2 py-0.5 rounded text-xs bg-gray-700 text-blue-300 font-mono">${log.action || ''}</span></td>
+          <td class="px-4 py-2 text-gray-300 text-xs">${log.actor || '—'}</td>
+          <td class="px-4 py-2 text-gray-400 text-xs max-w-xs truncate">${log.details || '—'}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-500">No audit entries found</td></tr>'}
+      </tbody>
+    </table>
+  </div>
+  <div class="flex items-center justify-between mt-4 text-sm text-gray-400">
+    <span>Page ${page} · Showing ${offset + 1}–${Math.min(offset + limit, total?.cnt || 0)} of ${total?.cnt || 0}</span>
+    <div class="flex gap-2">
+      ${page > 1 ? `<a href="/audit-log?page=${page-1}" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg">← Prev</a>` : ''}
+      ${(offset + limit) < (total?.cnt || 0) ? `<a href="/audit-log?page=${page+1}" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg">Next →</a>` : ''}
+    </div>
+  </div>
+</div>
+<script>
+function applyFilter() {
+  const c = document.getElementById('client-filter').value
+  const a = document.getElementById('action-filter').value
+  let url = '/audit-log?'
+  if (c) url += 'client_id='+c+'&'
+  if (a) url += 'action='+encodeURIComponent(a)
+  window.location.href = url
+}
+</script>
+</body></html>`)
+})
+
+// GET /api/export/audit-log — CSV export
+app.get('/api/export/audit-log', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const logs = await DB.prepare(`SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 5000`).all()
+  const rows = (logs.results as any[]).map(l => `"${l.created_at||''}","${l.entity_type||''}","${l.entity_id||''}","${l.action||''}","${l.actor||''}","${(l.details||'').replace(/"/g,"'")}"`)
+  const csv = ['timestamp,entity_type,entity_id,action,actor,details', ...rows].join('\n')
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="audit-log-${new Date().toISOString().split('T')[0]}.csv"` } })
+})
+
+// ============================================================
+// FEATURE: ENHANCED DASHBOARD NAVIGATION (update existing)
+// ============================================================
+
+// GET /api/intake/sessions — list all intake sessions (admin)
+app.get('/api/intake/sessions', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const sessions = await DB.prepare(`SELECT s.*, cl.first_name, cl.last_name FROM intake_sessions s LEFT JOIN clients cl ON cl.id = s.client_id ORDER BY s.created_at DESC LIMIT 100`).all()
+  return c.json({ sessions: sessions.results })
+})
+
+// GET /api/e-signatures/:clientId — get client's signatures
+app.get('/api/e-signatures/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const sigs = await DB.prepare(`SELECT * FROM e_signatures WHERE client_id = ? ORDER BY signed_at DESC`).bind(clientId).all()
+  return c.json({ signatures: sigs.results })
+})
+
+// GET /api/legal-templates — list active templates
+app.get('/api/legal-templates', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const templates = await DB.prepare(`SELECT id, template_name, template_type, version, effective_date, approved_by, is_active, change_notes, created_at FROM legal_template_versions ORDER BY template_type, version DESC`).all()
+  return c.json({ templates: templates.results })
+})
+
+// GET /api/legal-templates/:type — get active template content
+app.get('/api/legal-templates/:type', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const type = c.req.param('type')
+  const tmpl = await DB.prepare(`SELECT * FROM legal_template_versions WHERE template_type = ? AND is_active = 1 ORDER BY id DESC LIMIT 1`).bind(type).first()
+  if (!tmpl) return c.json({ error: 'Template not found' }, 404)
+  return c.json({ template: tmpl })
+})
+
+// POST /api/legal-templates — create/version a template (admin)
+app.post('/api/legal-templates', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.template_type || !body.content) return c.json({ error: 'template_type and content required' }, 400)
+  // Deactivate old versions
+  await DB.prepare(`UPDATE legal_template_versions SET is_active = 0 WHERE template_type = ?`).bind(body.template_type).run()
+  const ins = await DB.prepare(`INSERT INTO legal_template_versions (template_name, template_type, version, content, effective_date, approved_by, is_active, change_notes) VALUES (?,?,?,?,?,?,1,?)`).bind(body.template_name || body.template_type, body.template_type, body.version || '1.0', body.content, body.effective_date || new Date().toISOString().split('T')[0], body.approved_by || null, body.change_notes || null).run()
+  await DB.prepare(`INSERT INTO approval_logs (entity_type, entity_id, action, performed_by, notes) VALUES (?,?,'applied',?,?)`).bind('legal_template', ins.meta?.last_row_id, body.approved_by || 'admin', `New version: ${body.version}`).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+// ============================================================
+// FEATURE: OVERDUE DEADLINE CRON CHECK
+// ============================================================
+app.post('/api/cron/check-deadlines', async (c) => {
+  const env = c.env; const { DB } = env
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const start = Date.now()
+  const today = new Date().toISOString().split('T')[0]
+  // Find all overdue open deadlines
+  const overdue = await DB.prepare(`SELECT d.*, cl.email, cl.first_name, cl.phone FROM deadlines d JOIN clients cl ON cl.id = d.client_id WHERE d.deadline_date < ? AND d.status = 'open' AND d.reminder_sent_at IS NULL`).bind(today).all()
+  let notified = 0
+  for (const dl of overdue.results as any[]) {
+    const msg = `⚠ OVERDUE: ${dl.deadline_type.replace(/_/g,' ')} deadline was ${dl.deadline_date} for ${dl.description || 'client deadline'}. Immediate action required.`
+    // Notify staff via system notification
+    await DB.prepare(`INSERT INTO notifications (client_id, type, title, message) VALUES (?,?,?,?)`).bind(dl.client_id, 'compliance', 'Overdue Deadline', msg).run()
+    // Send client email if bureau response deadline
+    if (dl.deadline_type === 'bureau_response' && dl.email) {
+      await sendEmail(env, dl.email, 'Important: Bureau Response Deadline Passed',
+        `Hi ${dl.first_name},\n\nThe 30-day bureau response deadline for your dispute has passed (${dl.deadline_date}). This may entitle you to additional remedies under FCRA § 611. Our team is reviewing your case for escalation options.\n\nRJ Business Solutions`)
+    }
+    await DB.prepare(`UPDATE deadlines SET reminder_sent_at = datetime('now') WHERE id = ?`).bind(dl.id).run()
+    notified++
+  }
+  const duration = Date.now() - start
+  await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details) VALUES (?,?,?,?,?)`).bind('check_deadlines', 'success', notified, duration, `Overdue deadlines notified: ${notified}`).run()
+  return c.json({ success: true, overdue_count: (overdue.results as any[]).length, notified, duration_ms: duration })
+})
+
 export default app
+
 
