@@ -14,9 +14,19 @@
     }
   ]
   // Secrets (set via `wrangler secret put` or .dev.vars for local):
+  // AUTH_SECRET — master session signing secret (set this!)
+  // ADMIN_PASSWORD — staff login password (default: rjbs2026)
   // MFSN_API_URL, MFSN_API_EMAIL, MFSN_API_PASSWORD
-  // STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY
+  // STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
   // TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
   // SENDGRID_API_KEY, RESEND_API_KEY
-  // OPENROUTER_API_KEY, GROQ_API_KEY
+  // OPENROUTER_API_KEY, GROQ_API_KEY, OPENAI_API_KEY
+  // GHL_API_KEY, GHL_LOCATION_ID
+  //
+  // CRON JOBS — trigger these endpoints on a schedule:
+  // Daily 9am:   POST /api/cron/process-sequences  (email+SMS drip)
+  // Daily 9am:   POST /api/cron/generate-kpis      (KPI snapshot)
+  // Monthly 1st: POST /api/cron/pull-reports        (credit report refresh)
+  // Use cron-job.org, Cloudflare Workers Cron, or any HTTP scheduler.
+  // Secure with X-Cron-Secret header matching CRON_SECRET env var.
 }

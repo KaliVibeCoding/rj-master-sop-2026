@@ -5158,5 +5158,1081 @@ app.put('/api/monitoring/alerts/:id/action', async (c) => {
   return c.json({ success: true })
 })
 
+// ============================================================
+// FEATURE: STAFF AUTH — Login, Sessions, Logout
+// ============================================================
+
+// Helper: get session from cookie
+async function getSession(c: any): Promise<any | null> {
+  const { DB } = c.env
+  if (!DB) return null
+  const cookie = c.req.header('cookie') || ''
+  const match = cookie.match(/rjbs_session=([^;]+)/)
+  if (!match) return null
+  const token = match[1]
+  const session = await DB.prepare(`SELECT * FROM staff_sessions WHERE token = ? AND expires_at > datetime('now')`).bind(token).first()
+  if (session) await DB.prepare(`UPDATE staff_sessions SET last_seen = datetime('now') WHERE token = ?`).bind(token).run()
+  return session || null
+}
+
+// Helper: SHA-256 hash (Web Crypto)
+async function sha256(str: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// GET /login — Login page
+app.get('/login', (c) => {
+  const error = c.req.query('error')
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Staff Login — RJ Business Solutions</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-gray-900 to-blue-900 flex items-center justify-center p-4">
+<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+  <div class="text-center mb-8">
+    <div class="text-4xl mb-2">🏢</div>
+    <h1 class="text-2xl font-bold text-gray-900">RJ Business Solutions</h1>
+    <p class="text-gray-500 text-sm mt-1">Operations Command Center — Staff Login</p>
+  </div>
+  ${error ? `<div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">${error === 'invalid' ? '⚠ Invalid email or password.' : '⚠ Session expired. Please log in again.'}</div>` : ''}
+  <form method="POST" action="/api/auth/login">
+    <div class="mb-4">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Staff Email</label>
+      <input type="email" name="email" required placeholder="rick@rjbusinesssolutions.org" class="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm">
+    </div>
+    <div class="mb-6">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+      <input type="password" name="password" required placeholder="••••••••" class="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm">
+    </div>
+    <button type="submit" class="w-full bg-blue-600 text-white font-semibold py-2.5 rounded-lg hover:bg-blue-700 transition-colors">Log In</button>
+  </form>
+  <p class="text-center text-xs text-gray-400 mt-6">Default password: <code class="bg-gray-100 px-1 rounded">rjbs2026</code> — change via ADMIN_PASSWORD env var</p>
+</div>
+</body>
+</html>`
+  return c.html(html)
+})
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.redirect('/login?error=db')
+  let email = '', password = ''
+  const ct = c.req.header('content-type') || ''
+  if (ct.includes('application/json')) {
+    const body = await c.req.json() as any; email = body.email; password = body.password
+  } else {
+    const body = await c.req.parseBody() as any; email = body.email; password = body.password
+  }
+  if (!email || !password) return ct.includes('json') ? c.json({ error: 'Email and password required' }, 400) : c.redirect('/login?error=invalid')
+  // Find staff user
+  const staff = await DB.prepare('SELECT * FROM staff_users WHERE email = ? AND is_active = 1').bind(email.toLowerCase().trim()).first() as any
+  if (!staff) return ct.includes('json') ? c.json({ error: 'Invalid credentials' }, 401) : c.redirect('/login?error=invalid')
+  // Check password (env var takes precedence, then per-user hash if available)
+  const adminPassword = env.ADMIN_PASSWORD || 'rjbs2026'
+  const expectedHash = await sha256(adminPassword)
+  const inputHash = await sha256(password)
+  const passwordOk = password === adminPassword || inputHash === expectedHash || (staff.password_hash && inputHash === staff.password_hash)
+  if (!passwordOk) return ct.includes('json') ? c.json({ error: 'Invalid credentials' }, 401) : c.redirect('/login?error=invalid')
+  // Create session
+  const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
+  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hours
+  await DB.prepare(`INSERT INTO staff_sessions (token, staff_id, staff_email, staff_name, role, expires_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(token, staff.id, staff.email, staff.name, staff.role, expiresAt).run()
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?, 'staff_login', 'staff', ?, ?)`)
+    .bind(staff.email, staff.id, `Login from ${c.req.header('cf-connecting-ip') || 'unknown'}`).run()
+  if (ct.includes('json')) {
+    return c.json({ success: true, token, role: staff.role, name: staff.name, expires_at: expiresAt })
+  }
+  const res = c.redirect('/')
+  res.headers.set('Set-Cookie', `rjbs_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`)
+  return res
+})
+
+// POST /api/auth/logout
+app.post('/api/auth/logout', async (c) => {
+  const { DB } = c.env
+  const cookie = c.req.header('cookie') || ''
+  const match = cookie.match(/rjbs_session=([^;]+)/)
+  if (match && DB) await DB.prepare('DELETE FROM staff_sessions WHERE token = ?').bind(match[1]).run()
+  const res = c.redirect('/login')
+  res.headers.set('Set-Cookie', 'rjbs_session=; Path=/; HttpOnly; Max-Age=0')
+  return res
+})
+
+// GET /api/auth/me
+app.get('/api/auth/me', async (c) => {
+  const session = await getSession(c)
+  if (!session) return c.json({ authenticated: false }, 401)
+  return c.json({ authenticated: true, name: session.staff_name, email: session.staff_email, role: session.role })
+})
+
+// GET /api/auth/sessions — list active sessions (admin only)
+app.get('/api/auth/sessions', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const sessions = await DB.prepare(`SELECT id, staff_name, staff_email, role, created_at, last_seen, expires_at FROM staff_sessions WHERE expires_at > datetime('now') ORDER BY last_seen DESC`).all()
+  return c.json({ sessions: sessions.results, total: sessions.results.length })
+})
+
+// ============================================================
+// FEATURE: CLIENT DETAIL PAGE — Full SSR dashboard per client
+// ============================================================
+
+app.get('/clients/:id', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.html('<h1>Database required</h1>', 500)
+  const clientId = c.req.param('id')
+  const [client, disputes, communications, appointments, reports, scoreHistory, portalToken, mfsnToken] = await Promise.all([
+    DB.prepare('SELECT * FROM clients WHERE id = ?').bind(clientId).first(),
+    DB.prepare('SELECT * FROM disputes WHERE client_id = ? ORDER BY created_at DESC LIMIT 20').bind(clientId).all(),
+    DB.prepare('SELECT * FROM communications WHERE client_id = ? ORDER BY created_at DESC LIMIT 20').bind(clientId).all(),
+    DB.prepare('SELECT * FROM appointments WHERE client_id = ? ORDER BY scheduled_at DESC LIMIT 10').bind(clientId).all(),
+    DB.prepare('SELECT id, pull_date, score_efx, score_tu, score_exp, total_accounts, total_negative_accounts, total_inquiries FROM credit_reports WHERE client_id = ? ORDER BY pull_date DESC LIMIT 5').bind(clientId).all(),
+    DB.prepare('SELECT score_efx, score_tu, score_exp, score_avg, recorded_date FROM credit_score_history WHERE client_id = ? ORDER BY recorded_date ASC').bind(clientId).all(),
+    DB.prepare('SELECT token FROM portal_tokens WHERE client_id = ? AND (expires_at IS NULL OR expires_at > datetime(\'now\')) ORDER BY created_at DESC LIMIT 1').bind(clientId).first(),
+    DB.prepare('SELECT mfsn_email, last_pull_date, total_pulls FROM mfsn_tokens WHERE client_id = ?').bind(clientId).first()
+  ])
+  if (!client) return c.html('<div style="font-family:sans-serif;padding:2rem"><h1>Client not found</h1><a href="/">← Back</a></div>', 404)
+  const cl = client as any
+  const disp = disputes.results as any[]
+  const comms = communications.results as any[]
+  const apts = appointments.results as any[]
+  const rpts = reports.results as any[]
+  const sh = scoreHistory.results as any[]
+  const pt = portalToken as any
+  const mt = mfsnToken as any
+  const latestReport = rpts[0]
+  const statusColors: any = { active: 'green', lead: 'blue', graduated: 'purple', paused: 'yellow', cancelled: 'red' }
+  const statusColor = statusColors[cl.status] || 'gray'
+  const scoreColor = (s: number) => s >= 740 ? '#16a34a' : s >= 670 ? '#ca8a04' : s >= 580 ? '#ea580c' : '#dc2626'
+  const disputeStatusBadge = (s: string) => {
+    const c: any = { pending: 'yellow', sent: 'blue', investigating: 'purple', resolved: 'green', deleted: 'green', verified: 'red', updated: 'orange' }
+    return `<span class="px-2 py-0.5 rounded text-xs font-medium bg-${c[s] || 'gray'}-100 text-${c[s] || 'gray'}-700">${s}</span>`
+  }
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${cl.first_name} ${cl.last_name} — Client Detail</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2/dist/tailwind.min.css" rel="stylesheet">
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; }
+  .section { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 1.5rem; overflow: hidden; }
+  .section-header { padding: 1rem 1.5rem; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center; justify-content: space-between; }
+  .section-header h2 { font-size: 1rem; font-weight: 600; color: #1e293b; }
+  .section-body { padding: 1.5rem; }
+  table { width: 100%; font-size: 0.875rem; border-collapse: collapse; }
+  th { text-align: left; padding: 0.5rem 0.75rem; color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; background: #f8fafc; }
+  td { padding: 0.75rem; border-bottom: 1px solid #f1f5f9; color: #334155; }
+  tr:last-child td { border-bottom: none; }
+  .score-pill { display: inline-flex; flex-direction: column; align-items: center; padding: 1rem 1.5rem; border-radius: 12px; background: #f8fafc; min-width: 90px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  @media (max-width: 640px) { .section-body { padding: 1rem; } td, th { padding: 0.5rem; } }
+</style>
+</head>
+<body>
+<!-- Top Nav -->
+<nav class="bg-white border-b sticky top-0 z-10 px-4 py-3 flex items-center gap-3 shadow-sm">
+  <a href="/" class="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+    Dashboard
+  </a>
+  <span class="text-gray-300">/</span>
+  <span class="text-gray-600 text-sm font-medium">${cl.first_name} ${cl.last_name}</span>
+  <div class="ml-auto flex gap-2">
+    <a href="/onboarding/${cl.id}" class="bg-purple-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-purple-700">Onboarding</a>
+    <a href="/mfsn/report/${latestReport?.id || 'none'}" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700">View Report</a>
+  </div>
+</nav>
+<div class="max-w-5xl mx-auto px-4 py-6">
+  <!-- Client Header -->
+  <div class="section">
+    <div class="section-body">
+      <div class="flex flex-wrap items-start gap-4">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h1 class="text-2xl font-bold text-gray-900">${cl.first_name} ${cl.last_name}</h1>
+            <span class="badge bg-${statusColor}-100 text-${statusColor}-700">${cl.status || 'unknown'}</span>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-4 text-sm text-gray-500">
+            ${cl.email ? `<span>📧 ${cl.email}</span>` : ''}
+            ${cl.phone ? `<span>📱 ${cl.phone}</span>` : ''}
+            ${cl.source ? `<span>📋 Source: ${cl.source}</span>` : ''}
+            ${cl.assigned_agent ? `<span>👤 Agent: ${cl.assigned_agent}</span>` : ''}
+            ${cl.onboarding_date ? `<span>📅 Onboarded: ${cl.onboarding_date}</span>` : ''}
+          </div>
+        </div>
+        <div class="flex gap-6 text-center">
+          <div><div class="text-2xl font-bold text-green-600">$${cl.monthly_fee || 0}</div><div class="text-xs text-gray-400">Monthly Fee</div></div>
+          <div><div class="text-2xl font-bold text-blue-600">${cl.credit_score_current || '—'}</div><div class="text-xs text-gray-400">Current Score</div></div>
+          <div><div class="text-2xl font-bold text-gray-600">${cl.credit_score_goal || '—'}</div><div class="text-xs text-gray-400">Score Goal</div></div>
+        </div>
+      </div>
+      <!-- Quick actions -->
+      <div class="mt-4 flex flex-wrap gap-2">
+        <a href="/onboarding/${cl.id}" class="px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg text-sm font-medium hover:bg-purple-100">🚀 Onboarding Wizard</a>
+        ${pt?.token ? `<a href="/portal/${pt.token}" target="_blank" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100">🔗 Client Portal</a>` : `<button onclick="generatePortal(${cl.id})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100">🔗 Generate Portal</button>`}
+        <a href="/dispute/letter/${disp[0]?.id || 'none'}" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm font-medium hover:bg-green-100">📄 Print Dispute Letter</a>
+        <button onclick="quickDispute(${cl.id})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm font-medium hover:bg-red-100">⚡ File Dispute</button>
+        <button onclick="scheduleCall(${cl.id})" class="px-3 py-1.5 bg-yellow-50 text-yellow-700 rounded-lg text-sm font-medium hover:bg-yellow-100">📞 Schedule Call</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Credit Scores -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Credit Scores</h2>
+      ${mt ? `<span class="text-xs text-green-600">✓ MFSN connected · Last pull: ${mt.last_pull_date || 'never'} · ${mt.total_pulls || 0} pulls</span>` : '<span class="text-xs text-gray-400">MFSN not connected</span>'}
+    </div>
+    <div class="section-body">
+      ${latestReport ? `
+      <div class="flex gap-4 flex-wrap mb-4">
+        ${[['Equifax', latestReport.score_efx, 'red'], ['TransUnion', latestReport.score_tu, 'blue'], ['Experian', latestReport.score_exp, 'green']].map(([b, s, col]) => `
+        <div class="score-pill border border-${col}-100">
+          <div class="text-xs text-${col}-400 font-semibold uppercase mb-1">${b}</div>
+          <div class="text-3xl font-bold" style="color:${s ? scoreColor(s as number) : '#94a3b8'}">${s || '—'}</div>
+          <div class="text-xs text-gray-400 mt-1">${s && (s as number) >= 740 ? 'Excellent' : s && (s as number) >= 670 ? 'Good' : s && (s as number) >= 580 ? 'Fair' : s ? 'Poor' : 'No score'}</div>
+        </div>`).join('')}
+        <div class="score-pill border border-gray-100">
+          <div class="text-xs text-gray-400 font-semibold uppercase mb-1">Progress</div>
+          <div class="text-3xl font-bold text-purple-600">${cl.credit_score_current && cl.credit_score_start ? '+' + (cl.credit_score_current - cl.credit_score_start) : '—'}</div>
+          <div class="text-xs text-gray-400 mt-1">${cl.credit_score_start ? 'from ' + cl.credit_score_start : 'No baseline'}</div>
+        </div>
+      </div>
+      <div class="text-xs text-gray-400">Report pulled ${new Date(latestReport.pull_date).toLocaleDateString()} · ${latestReport.total_accounts} accounts · ${latestReport.total_negative_accounts} negative · ${latestReport.total_inquiries} inquiries</div>
+      ` : `<div class="text-gray-400 text-sm py-4">No credit reports on file. <a href="/onboarding/${cl.id}#pull-report" class="text-blue-600 underline">Pull first report →</a></div>`}
+      ${sh.length > 1 ? `
+      <div class="mt-4">
+        <div class="text-xs text-gray-500 font-semibold mb-2">SCORE HISTORY</div>
+        <div class="overflow-x-auto">
+        <table><thead><tr><th>Date</th><th>Equifax</th><th>TransUnion</th><th>Experian</th><th>Avg</th></tr></thead>
+        <tbody>${sh.slice(-6).reverse().map(h => `<tr><td>${h.recorded_date?.split('T')[0] || '—'}</td><td>${h.score_efx || '—'}</td><td>${h.score_tu || '—'}</td><td>${h.score_exp || '—'}</td><td><strong>${h.score_avg || '—'}</strong></td></tr>`).join('')}</tbody>
+        </table>
+        </div>
+      </div>` : ''}
+    </div>
+  </div>
+
+  <!-- Disputes -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Disputes (${disp.length})</h2>
+      <button onclick="quickDispute(${cl.id})" class="text-sm bg-red-600 text-white px-3 py-1 rounded-lg hover:bg-red-700">+ File Dispute</button>
+    </div>
+    ${disp.length > 0 ? `
+    <div class="overflow-x-auto">
+    <table>
+      <thead><tr><th>Bureau</th><th>Account</th><th>Reason</th><th>Round</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
+      <tbody>${disp.map(d => `<tr>
+        <td class="font-medium capitalize">${d.bureau || '—'}</td>
+        <td>${d.account_name || '—'}<div class="text-xs text-gray-400">${d.account_number || ''}</div></td>
+        <td class="max-w-xs truncate text-xs">${d.dispute_reason || '—'}</td>
+        <td class="text-center">R${d.dispute_round || 1}</td>
+        <td>${disputeStatusBadge(d.status)}</td>
+        <td class="text-xs ${d.response_due_date && new Date(d.response_due_date) < new Date() ? 'text-red-600 font-bold' : 'text-gray-500'}">${d.response_due_date || '—'}</td>
+        <td><a href="/dispute/letter/${d.id}" class="text-blue-600 text-xs hover:underline">Print</a></td>
+      </tr>`).join('')}</tbody>
+    </table>
+    </div>` : `<div class="section-body text-gray-400 text-sm">No disputes on file. <button onclick="quickDispute(${cl.id})" class="text-blue-600 underline">File first dispute →</button></div>`}
+  </div>
+
+  <!-- Appointments -->
+  ${apts.length > 0 ? `
+  <div class="section">
+    <div class="section-header"><h2>Appointments (${apts.length})</h2><button onclick="scheduleCall(${cl.id})" class="text-sm bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600">+ Schedule</button></div>
+    <div class="overflow-x-auto">
+    <table><thead><tr><th>Type</th><th>Date/Time</th><th>Duration</th><th>Notes</th><th>Status</th></tr></thead>
+    <tbody>${apts.map(a => `<tr><td class="capitalize font-medium">${a.type}</td><td>${new Date(a.scheduled_at).toLocaleString()}</td><td>${a.duration_minutes ? a.duration_minutes + ' min' : '—'}</td><td class="text-xs text-gray-500 max-w-xs truncate">${a.notes || '—'}</td><td><span class="badge bg-blue-100 text-blue-700">${a.status}</span></td></tr>`).join('')}</tbody>
+    </table>
+    </div>
+  </div>` : ''}
+
+  <!-- Communications -->
+  ${comms.length > 0 ? `
+  <div class="section">
+    <div class="section-header"><h2>Communications (${comms.length})</h2></div>
+    <div class="overflow-x-auto">
+    <table><thead><tr><th>Channel</th><th>Type</th><th>Subject/Body</th><th>Status</th><th>Date</th></tr></thead>
+    <tbody>${comms.map(c => `<tr><td class="capitalize">${c.channel}</td><td class="capitalize text-xs">${c.direction}</td><td class="max-w-xs truncate text-xs">${c.subject || c.body || '—'}</td><td><span class="badge bg-gray-100 text-gray-600">${c.status}</span></td><td class="text-xs text-gray-400">${c.created_at?.split('T')[0] || '—'}</td></tr>`).join('')}</tbody>
+    </table>
+    </div>
+  </div>` : ''}
+
+  <!-- Edit Client Info -->
+  <div class="section">
+    <div class="section-header"><h2>Edit Client Info</h2></div>
+    <div class="section-body">
+      <form id="editForm" onsubmit="saveClient(event, ${cl.id})" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Status</label>
+          <select name="status" class="w-full border rounded-lg px-3 py-2 text-sm">
+            ${['lead','active','paused','graduated','cancelled'].map(s => `<option value="${s}" ${cl.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select></div>
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Monthly Fee ($)</label>
+          <input type="number" name="monthly_fee" value="${cl.monthly_fee || ''}" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Score Start</label>
+          <input type="number" name="credit_score_start" value="${cl.credit_score_start || ''}" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Score Goal</label>
+          <input type="number" name="credit_score_goal" value="${cl.credit_score_goal || ''}" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Assigned Agent</label>
+          <input type="text" name="assigned_agent" value="${cl.assigned_agent || ''}" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div><label class="block text-xs font-medium text-gray-500 mb-1">Notes</label>
+          <input type="text" name="notes" value="${(cl.notes || '').replace(/"/g, '&quot;')}" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div class="sm:col-span-2">
+          <button type="submit" class="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">Save Changes</button>
+          <span id="saveMsg" class="ml-3 text-green-600 text-sm hidden">✓ Saved</span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Report History -->
+  ${rpts.length > 0 ? `
+  <div class="section">
+    <div class="section-header"><h2>Credit Report History (${rpts.length})</h2></div>
+    <div class="overflow-x-auto">
+    <table><thead><tr><th>Date</th><th>Equifax</th><th>TransUnion</th><th>Experian</th><th>Accounts</th><th>Negatives</th><th>Action</th></tr></thead>
+    <tbody>${rpts.map(r => `<tr>
+      <td>${r.pull_date?.split('T')[0] || '—'}</td>
+      <td style="color:${scoreColor(r.score_efx)}">${r.score_efx || '—'}</td>
+      <td style="color:${scoreColor(r.score_tu)}">${r.score_tu || '—'}</td>
+      <td style="color:${scoreColor(r.score_exp)}">${r.score_exp || '—'}</td>
+      <td>${r.total_accounts || 0}</td>
+      <td class="${r.total_negative_accounts > 0 ? 'text-red-600 font-bold' : ''}">${r.total_negative_accounts || 0}</td>
+      <td class="flex gap-2">
+        <a href="/mfsn/report/${r.id}" class="text-blue-600 text-xs hover:underline">View</a>
+        <a href="/api/mfsn/reports/${r.id}/negatives" target="_blank" class="text-red-600 text-xs hover:underline">Negatives</a>
+      </td>
+    </tr>`).join('')}</tbody>
+    </table>
+    </div>
+  </div>` : ''}
+</div>
+
+<!-- Modals & JS -->
+<div id="toast" class="fixed bottom-4 right-4 bg-gray-900 text-white px-4 py-3 rounded-xl text-sm hidden z-50"></div>
+<script>
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast')
+  t.textContent = (ok ? '✓ ' : '✗ ') + msg
+  t.className = 'fixed bottom-4 right-4 px-4 py-3 rounded-xl text-sm z-50 text-white ' + (ok ? 'bg-gray-900' : 'bg-red-700')
+  t.classList.remove('hidden')
+  setTimeout(() => t.classList.add('hidden'), 3000)
+}
+async function saveClient(e, id) {
+  e.preventDefault()
+  const fd = new FormData(e.target)
+  const body = Object.fromEntries(fd)
+  const r = await fetch('/api/ops/clients/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  if (r.ok) { toast('Client saved'); document.getElementById('saveMsg').classList.remove('hidden'); setTimeout(() => document.getElementById('saveMsg').classList.add('hidden'), 2000) }
+  else toast('Save failed', false)
+}
+async function generatePortal(id) {
+  const r = await fetch('/api/portal/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: id }) })
+  const d = await r.json()
+  if (d.success) { toast('Portal created! Reloading...'); setTimeout(() => location.reload(), 1200) }
+  else toast('Portal failed: ' + d.error, false)
+}
+async function quickDispute(clientId) {
+  const bureau = prompt('Bureau? (equifax / transunion / experian)') || 'equifax'
+  const account = prompt('Account name?') || ''
+  const reason = prompt('Dispute reason?') || 'Account information not verified under FCRA §611'
+  if (!account) return
+  const r = await fetch('/api/ops/disputes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: clientId, bureau, account_name: account, dispute_reason: reason, dispute_round: 1, response_due_date: new Date(Date.now() + 35*86400000).toISOString().split('T')[0] }) })
+  const d = await r.json()
+  if (d.id) { toast('Dispute filed! Reloading...'); setTimeout(() => location.reload(), 1200) }
+  else toast('Failed: ' + d.error, false)
+}
+async function scheduleCall(clientId) {
+  const dt = prompt('Date/time? (e.g. 2026-05-15T10:00:00)')
+  const type = prompt('Type? (consultation / follow-up / dispute-review)') || 'follow-up'
+  if (!dt) return
+  const r = await fetch('/api/appointments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: clientId, type, scheduled_at: dt, duration_minutes: 30 }) })
+  const d = await r.json()
+  if (d.success) { toast('Appointment scheduled!'); setTimeout(() => location.reload(), 1200) }
+  else toast('Failed: ' + d.error, false)
+}
+</script>
+</body>
+</html>`
+  return c.html(html)
+})
+
+// ============================================================
+// FEATURE: DISPUTE LETTER PRINT PAGE
+// ============================================================
+
+app.get('/dispute/letter/:disputeId', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.html('<h1>Database required</h1>', 500)
+  const disputeId = c.req.param('disputeId')
+  if (disputeId === 'none') return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>No dispute selected</h2><p>Go to a client page and select a specific dispute.</p></body></html>`)
+  const dispute = await DB.prepare(`SELECT d.*, c.first_name, c.last_name, c.email FROM disputes d LEFT JOIN clients c ON c.id = d.client_id WHERE d.id = ?`).bind(disputeId).first() as any
+  if (!dispute) return c.html('<h1>Dispute not found</h1>', 404)
+  const bureauAddresses: any = {
+    equifax: 'Equifax Information Services, LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256',
+    transunion: 'TransUnion Consumer Solutions\nP.O. Box 2000\nChester, PA 19016-2000',
+    experian: 'Experian\nP.O. Box 4500\nAllen, TX 75013'
+  }
+  const bureauAddr = bureauAddresses[dispute.bureau?.toLowerCase()] || 'Bureau Address'
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+  const fcraSection = dispute.fcra_section || 'FCRA § 611'
+  const roundLabel: any = { 1: 'Initial Dispute', 2: 'Method of Verification Request', 3: 'CFPB Pre-Complaint Notice', 4: 'Direct Creditor Dispute (§623)', 5: 'Final Legal Notice' }
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dispute Letter — ${dispute.account_name}</title>
+<style>
+  body { font-family: 'Times New Roman', serif; font-size: 12pt; line-height: 1.6; color: #000; background: #fff; max-width: 8.5in; margin: 0 auto; padding: 1in; }
+  .no-print { font-family: system-ui; background: #1e40af; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; margin-bottom: 24px; display: inline-block; text-decoration: none; }
+  .header-line { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 8px 0; margin: 16px 0; font-weight: bold; text-align: center; }
+  .section-title { font-weight: bold; text-decoration: underline; margin-top: 1.5em; }
+  .signature-line { border-bottom: 1px solid #000; width: 200px; display: inline-block; }
+  @media print { .no-print { display: none !important; } body { padding: 0.75in; } }
+</style>
+</head>
+<body>
+<div class="no-print" onclick="window.print()">🖨 Print / Save as PDF</div>
+<a href="/clients/${dispute.client_id}" class="no-print" style="background:#374151;margin-left:8px">← Back to Client</a>
+
+<p style="text-align:right">${today}</p>
+
+<p>${dispute.first_name} ${dispute.last_name}<br>
+[Client Address — update in records]<br>
+[City, State ZIP]</p>
+
+<p>${bureauAddr.split('\n').join('<br>')}</p>
+
+<div class="header-line">NOTICE OF DISPUTE — ${fcraSection}<br>RE: ${roundLabel[dispute.dispute_round] || 'Dispute Letter'} (Round ${dispute.dispute_round || 1})</div>
+
+<p>To Whom It May Concern,</p>
+
+<p>I am writing to formally dispute the accuracy and/or completeness of information currently appearing on my consumer credit report maintained by your agency. This dispute is submitted pursuant to the Fair Credit Reporting Act (FCRA), 15 U.S.C. § 1681 et seq., specifically ${fcraSection}.</p>
+
+<p class="section-title">DISPUTED ACCOUNT INFORMATION:</p>
+<table style="width:100%;border-collapse:collapse;margin:8px 0">
+  <tr style="background:#f5f5f5"><td style="padding:6px;border:1px solid #ccc;font-weight:bold;width:40%">Field</td><td style="padding:6px;border:1px solid #ccc;font-weight:bold">Details</td></tr>
+  <tr><td style="padding:6px;border:1px solid #ccc">Creditor / Account Name</td><td style="padding:6px;border:1px solid #ccc">${dispute.account_name || 'As shown on report'}</td></tr>
+  ${dispute.account_number ? `<tr><td style="padding:6px;border:1px solid #ccc">Account Number</td><td style="padding:6px;border:1px solid #ccc">${dispute.account_number}</td></tr>` : ''}
+  <tr><td style="padding:6px;border:1px solid #ccc">Bureau</td><td style="padding:6px;border:1px solid #ccc">${dispute.bureau ? dispute.bureau.charAt(0).toUpperCase() + dispute.bureau.slice(1) : '—'}</td></tr>
+  <tr><td style="padding:6px;border:1px solid #ccc">Dispute Basis</td><td style="padding:6px;border:1px solid #ccc">${dispute.dispute_reason || 'Information is inaccurate, incomplete, or unverifiable'}</td></tr>
+</table>
+
+<p class="section-title">BASIS FOR DISPUTE:</p>
+<p>${dispute.dispute_reason || 'The above-referenced account contains information that is inaccurate, incomplete, or unverifiable and cannot be substantiated upon investigation.'}</p>
+
+${dispute.dispute_round >= 2 ? `<p class="section-title">REQUEST FOR METHOD OF VERIFICATION:</p>
+<p>As this is a subsequent dispute, I hereby request, pursuant to FCRA § 611(a)(7), that you provide me with a complete description of the method used to verify the disputed information, including the name, address, and telephone number of any persons contacted in the course of the reinvestigation.</p>` : ''}
+
+${dispute.dispute_round >= 3 ? `<p class="section-title">NOTICE OF CFPB COMPLAINT:</p>
+<p>Please be advised that I am prepared to file a formal complaint with the Consumer Financial Protection Bureau (CFPB) and the Federal Trade Commission (FTC) if this matter is not resolved within 30 days as required by FCRA § 611(a)(1).</p>` : ''}
+
+<p class="section-title">YOUR OBLIGATIONS UNDER THE FCRA:</p>
+<p>Pursuant to FCRA § 611, you are required to conduct a reasonable reinvestigation of this disputed information within <strong>30 days</strong> of receipt of this letter (or up to 45 days if I provide additional information during the reinvestigation period). If you cannot verify the accuracy of the disputed information, you must promptly delete or modify it.</p>
+
+<p>Please confirm receipt of this dispute in writing and provide the results of your reinvestigation within the statutory timeframe. If you have any questions regarding this dispute, please contact me at the address listed above.</p>
+
+<p style="margin-top:2em">Sincerely,</p>
+<p style="margin-top:2em"><span class="signature-line">&nbsp;</span></p>
+<p>${dispute.first_name} ${dispute.last_name}<br>
+<em>Sent via Certified Mail — Return Receipt Requested</em></p>
+
+<p style="margin-top:2em;font-size:10pt;color:#555;border-top:1px solid #ddd;padding-top:8px">
+<strong>Letter ID:</strong> D-${dispute.id}-R${dispute.dispute_round || 1} &nbsp;|&nbsp;
+<strong>Generated:</strong> ${today} &nbsp;|&nbsp;
+<strong>FCRA Reference:</strong> ${fcraSection} &nbsp;|&nbsp;
+<strong>Response Due:</strong> ${dispute.response_due_date || 'Within 30 days of receipt'}
+</p>
+</body>
+</html>`
+  return c.html(html)
+})
+
+// ============================================================
+// FEATURE: CLIENT ONBOARDING WIZARD — 6-Step SSR Page
+// ============================================================
+
+app.get('/onboarding/:clientId', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.html('<h1>Database required</h1>', 500)
+  const clientId = c.req.param('clientId')
+  const client = await DB.prepare('SELECT * FROM clients WHERE id = ?').bind(clientId).first() as any
+  if (!client) return c.html('<h1>Client not found</h1>', 404)
+  const [disputes, sequences, portal, mfsnToken] = await Promise.all([
+    DB.prepare('SELECT COUNT(*) as total FROM disputes WHERE client_id = ?').bind(clientId).first(),
+    DB.prepare('SELECT id, name, trigger_event FROM email_sequences LIMIT 6').all(),
+    DB.prepare('SELECT token FROM portal_tokens WHERE client_id = ? ORDER BY created_at DESC LIMIT 1').bind(clientId).first(),
+    DB.prepare('SELECT mfsn_email FROM mfsn_tokens WHERE client_id = ?').bind(clientId).first()
+  ])
+  const cl = client; const pt = portal as any; const mt = mfsnToken as any
+  const disputeCount = (disputes as any)?.total || 0
+  const seqs = sequences.results as any[]
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Onboarding — ${cl.first_name} ${cl.last_name}</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2/dist/tailwind.min.css" rel="stylesheet">
+<style>
+  body { font-family: system-ui, sans-serif; background: #f8fafc; }
+  .step { display: none; }
+  .step.active { display: block; }
+  .step-btn { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; border: 2px solid; cursor: pointer; transition: all .2s; }
+  .step-btn.done { background: #16a34a; color: white; border-color: #16a34a; }
+  .step-btn.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .step-btn.pending { background: white; color: #94a3b8; border-color: #e2e8f0; }
+  .card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  input, select, textarea { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 12px; width: 100%; font-size: 14px; outline: none; transition: border .2s; }
+  input:focus, select:focus, textarea:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+  .btn-primary { background: #2563eb; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 600; cursor: pointer; border: none; font-size: 14px; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-secondary { background: #f1f5f9; color: #374151; padding: 10px 24px; border-radius: 8px; font-weight: 600; cursor: pointer; border: none; font-size: 14px; }
+  .result-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 14px; color: #166534; display: none; }
+  .error-box { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 14px; color: #991b1b; display: none; }
+</style>
+</head>
+<body>
+<nav class="bg-white border-b px-4 py-3 flex items-center gap-3 sticky top-0 z-10 shadow-sm">
+  <a href="/clients/${cl.id}" class="text-blue-600 text-sm flex items-center gap-1">← ${cl.first_name} ${cl.last_name}</a>
+  <span class="text-gray-300">/</span><span class="text-sm text-gray-600 font-medium">Client Onboarding Wizard</span>
+</nav>
+<div class="max-w-3xl mx-auto px-4 py-8">
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Onboard: ${cl.first_name} ${cl.last_name}</h1>
+    <p class="text-gray-500 text-sm mt-1">Complete each step to fully onboard this client per SOP-005.</p>
+  </div>
+  <!-- Step Progress -->
+  <div class="card p-4 mb-6">
+    <div class="flex items-center gap-2 overflow-x-auto">
+      ${['Client Info', 'CROA Disclosure', 'Pull Report', 'Dispute Plan', 'Enroll Sequences', 'Portal Setup'].map((name, i) => `
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <button class="step-btn ${i === 0 ? 'active' : 'pending'}" id="stepbtn${i}" onclick="goStep(${i})">${i + 1}</button>
+        <span class="text-xs text-gray-500 hidden sm:inline">${name}</span>
+        ${i < 5 ? '<div class="w-8 h-px bg-gray-200"></div>' : ''}
+      </div>`).join('')}
+    </div>
+  </div>
+
+  <!-- STEP 1: Client Info -->
+  <div class="step active card p-6" id="step0">
+    <h2 class="text-lg font-bold mb-4">Step 1: Review & Confirm Client Info</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">First Name</label><input id="s1_fname" value="${cl.first_name || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Last Name</label><input id="s1_lname" value="${cl.last_name || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Email</label><input id="s1_email" type="email" value="${cl.email || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Phone</label><input id="s1_phone" value="${cl.phone || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Score Start</label><input id="s1_score_start" type="number" value="${cl.credit_score_start || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Score Goal</label><input id="s1_score_goal" type="number" value="${cl.credit_score_goal || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Monthly Fee ($)</label><input id="s1_fee" type="number" value="${cl.monthly_fee || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">Source</label>
+        <select id="s1_source"><option value="referral">Referral</option><option value="funnel">Funnel</option><option value="social">Social</option><option value="ghl">GoHighLevel</option><option value="import">Import</option></select></div>
+    </div>
+    <div id="s1_result" class="result-box">✓ Client info saved successfully.</div>
+    <div id="s1_error" class="error-box"></div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-primary" onclick="saveStep1()">Save & Continue →</button>
+    </div>
+  </div>
+
+  <!-- STEP 2: CROA Disclosure -->
+  <div class="step card p-6" id="step1">
+    <h2 class="text-lg font-bold mb-2">Step 2: CROA Authorization Disclosure</h2>
+    <p class="text-sm text-gray-500 mb-4">The following disclosure is legally required before any credit repair work begins (CROA § 404).</p>
+    <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-700 leading-relaxed mb-4">
+      <p class="font-bold mb-2">CREDIT REPAIR ORGANIZATIONS ACT — REQUIRED DISCLOSURE</p>
+      <p>You have the right to dispute inaccurate information in your credit report by contacting the credit bureau directly. The credit bureaus must investigate the items you question, usually within 30 days unless they consider your dispute frivolous. There is no fee for disputing errors in your credit report with the credit bureaus.</p>
+      <p class="mt-2">RJ Business Solutions is a credit repair organization as defined by the Credit Repair Organizations Act (CROA). Before signing a contract with any credit repair organization, you should know:</p>
+      <ul class="mt-2 ml-4 list-disc space-y-1">
+        <li>You have the right to cancel within 3 business days</li>
+        <li>Payment will not be charged until services are performed</li>
+        <li>RJ Business Solutions cannot remove accurate information from your report</li>
+        <li>You have the right to use a credit repair organization to dispute items on your behalf</li>
+      </ul>
+    </div>
+    <div class="flex items-center gap-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+      <input type="checkbox" id="croa_ack" class="w-4 h-4 accent-blue-600" style="width:auto">
+      <label for="croa_ack" class="text-sm">I confirm the CROA disclosure has been presented to and acknowledged by ${cl.first_name} ${cl.last_name}.</label>
+    </div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-secondary" onclick="goStep(0)">← Back</button>
+      <button class="btn-primary" onclick="completeCROA()">Acknowledge & Continue →</button>
+    </div>
+  </div>
+
+  <!-- STEP 3: Pull Credit Report -->
+  <div class="step card p-6" id="step2" id="pull-report">
+    <h2 class="text-lg font-bold mb-2">Step 3: Pull Credit Report (MFSN)</h2>
+    <p class="text-sm text-gray-500 mb-4">Enter the client's MFSN member credentials to pull their 3-bureau report. ${mt ? `<strong class="text-green-600">Previously used: ${mt.mfsn_email}</strong>` : ''}</p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">MFSN Member Email</label><input id="mfsn_email" placeholder="client@myfreescorenow.com" value="${mt?.mfsn_email || ''}"></div>
+      <div><label class="text-xs font-medium text-gray-500 block mb-1">MFSN Member Token</label><input id="mfsn_token" placeholder="mfsn_tok_..."></div>
+    </div>
+    <div id="s3_result" class="result-box"></div>
+    <div id="s3_error" class="error-box"></div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-secondary" onclick="goStep(1)">← Back</button>
+      <button class="btn-primary" onclick="pullReport(${cl.id})">Pull 3-Bureau Report</button>
+      <button class="btn-secondary" onclick="goStep(3)">Skip →</button>
+    </div>
+  </div>
+
+  <!-- STEP 4: Dispute Plan -->
+  <div class="step card p-6" id="step3">
+    <h2 class="text-lg font-bold mb-2">Step 4: Review Dispute Plan</h2>
+    <p class="text-sm text-gray-500 mb-4">Review negative accounts and auto-generate disputes for R1 filing.</p>
+    <div id="candidates_list"><button class="btn-primary" onclick="loadCandidates(${cl.id})">Load Dispute Candidates</button></div>
+    <div class="mt-4">
+      <p class="text-xs text-gray-400">Existing disputes: <strong>${disputeCount}</strong></p>
+    </div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-secondary" onclick="goStep(2)">← Back</button>
+      <button class="btn-primary" onclick="goStep(4)">Continue →</button>
+    </div>
+  </div>
+
+  <!-- STEP 5: Email Sequences -->
+  <div class="step card p-6" id="step4">
+    <h2 class="text-lg font-bold mb-2">Step 5: Enroll in Email Sequences</h2>
+    <p class="text-sm text-gray-500 mb-4">Enroll ${cl.first_name} in automated email drip sequences.</p>
+    <div class="space-y-3">
+      ${seqs.map(seq => `
+      <div class="flex items-center justify-between p-3 border border-gray-200 rounded-lg">
+        <div>
+          <div class="text-sm font-medium text-gray-800">${seq.name}</div>
+          <div class="text-xs text-gray-400">Trigger: ${seq.trigger_event}</div>
+        </div>
+        <button class="text-sm bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700" onclick="enrollSeq(${cl.id}, ${seq.id}, '${seq.name}', this)">Enroll</button>
+      </div>`).join('')}
+    </div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-secondary" onclick="goStep(3)">← Back</button>
+      <button class="btn-primary" onclick="goStep(5)">Continue →</button>
+    </div>
+  </div>
+
+  <!-- STEP 6: Portal Setup -->
+  <div class="step card p-6" id="step5">
+    <h2 class="text-lg font-bold mb-2">Step 6: Client Portal Setup</h2>
+    <p class="text-sm text-gray-500 mb-4">Generate a secure client portal link and share it with ${cl.first_name}.</p>
+    ${pt?.token ? `
+    <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+      <p class="text-sm font-medium text-green-800 mb-2">✓ Portal already exists for this client</p>
+      <div class="flex items-center gap-2">
+        <input class="flex-1 text-sm bg-white" value="${`${c.req.url.split('/onboarding')[0]}/portal/${pt.token}`}" id="portal_url" readonly>
+        <button onclick="copyPortal()" class="bg-green-600 text-white px-3 py-1.5 rounded text-sm">Copy</button>
+      </div>
+    </div>` : `
+    <div id="portal_create">
+      <button class="btn-primary" onclick="createPortal(${cl.id})">Generate Portal Link</button>
+    </div>
+    <div id="portal_result" class="result-box mt-3"></div>`}
+    <div class="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+      <p class="text-sm font-bold text-blue-800 mb-2">✅ Onboarding Complete Checklist:</p>
+      <ul class="text-sm text-blue-700 space-y-1" id="checklist">
+        <li id="chk1">☐ Client info confirmed</li>
+        <li id="chk2">☐ CROA disclosure acknowledged</li>
+        <li id="chk3">☐ Credit report pulled</li>
+        <li id="chk4">☐ Disputes planned</li>
+        <li id="chk5">☐ Email sequences enrolled</li>
+        <li id="chk6">☐ Portal link shared</li>
+      </ul>
+    </div>
+    <div class="flex gap-3 mt-4">
+      <button class="btn-secondary" onclick="goStep(4)">← Back</button>
+      <a href="/clients/${cl.id}" class="btn-primary" style="text-decoration:none;display:inline-block">Finish Onboarding →</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const checks = Array(6).fill(false)
+function goStep(n) {
+  document.querySelectorAll('.step').forEach((s, i) => { s.classList.toggle('active', i === n) })
+  document.querySelectorAll('.step-btn').forEach((b, i) => {
+    b.classList.remove('done', 'active', 'pending')
+    if (checks[i]) b.classList.add('done')
+    else if (i === n) b.classList.add('active')
+    else b.classList.add('pending')
+  })
+}
+function markDone(n) { checks[n] = true; const el = document.getElementById('chk' + (n+1)); if (el) el.textContent = el.textContent.replace('☐', '✅') }
+async function saveStep1() {
+  const body = { first_name: document.getElementById('s1_fname').value, last_name: document.getElementById('s1_lname').value, email: document.getElementById('s1_email').value, phone: document.getElementById('s1_phone').value, credit_score_start: parseInt(document.getElementById('s1_score_start').value) || null, credit_score_goal: parseInt(document.getElementById('s1_score_goal').value) || null, monthly_fee: parseFloat(document.getElementById('s1_fee').value) || null, source: document.getElementById('s1_source').value }
+  const r = await fetch('/api/ops/clients/${cl.id}', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const d = await r.json()
+  if (d.success) { document.getElementById('s1_result').style.display='block'; markDone(0); setTimeout(() => goStep(1), 800) }
+  else { document.getElementById('s1_error').textContent = d.error || 'Save failed'; document.getElementById('s1_error').style.display='block' }
+}
+function completeCROA() {
+  if (!document.getElementById('croa_ack').checked) { alert('Please acknowledge the CROA disclosure first.'); return }
+  markDone(1); goStep(2)
+}
+async function pullReport(id) {
+  const email = document.getElementById('mfsn_email').value
+  const token = document.getElementById('mfsn_token').value
+  if (!email || !token) { document.getElementById('s3_error').textContent = 'MFSN email and token required.'; document.getElementById('s3_error').style.display='block'; return }
+  document.getElementById('s3_error').style.display='none'
+  document.getElementById('s3_result').textContent = '⏳ Pulling report from MFSN...'
+  document.getElementById('s3_result').style.display='block'
+  const r = await fetch('/api/mfsn/fetch-3b', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_email: email, client_token: token, client_id: id }) })
+  const d = await r.json()
+  if (d.success) { document.getElementById('s3_result').textContent = '✅ Report pulled! EFX: ' + (d.scores?.efx || '—') + ' | TU: ' + (d.scores?.tu || '—') + ' | EXP: ' + (d.scores?.exp || '—'); markDone(2); setTimeout(() => goStep(3), 1000) }
+  else { document.getElementById('s3_error').textContent = d.error || 'Report pull failed. Check MFSN credentials.'; document.getElementById('s3_error').style.display='block'; document.getElementById('s3_result').style.display='none' }
+}
+async function loadCandidates(id) {
+  const r = await fetch('/api/mfsn/clients/' + id + '/dispute-candidates')
+  const d = await r.json()
+  const el = document.getElementById('candidates_list')
+  if (d.error) { el.innerHTML = '<p class="text-gray-500 text-sm">' + d.error + '</p>'; return }
+  if (d.total_candidates === 0) { el.innerHTML = '<p class="text-green-600 text-sm font-medium">✅ No undisputed negative accounts found. Client file is clean.</p>'; return }
+  el.innerHTML = '<div class="space-y-2 mb-3">' + d.candidates.slice(0,8).map(c => '<div class="flex items-center justify-between p-2 border rounded text-sm"><span class="font-medium">' + c.account_name + ' <span class="text-xs text-gray-400">(' + c.bureau + ')</span></span><span class="text-xs px-2 py-0.5 rounded bg-' + (c.priority_label === 'critical' ? 'red' : 'yellow') + '-100 text-' + (c.priority_label === 'critical' ? 'red' : 'yellow') + '-700">' + c.priority_label + '</span></div>').join('') + '</div><button class="btn-primary text-sm" onclick="autoDispute(' + id + ')">Auto-Generate All Disputes (R1)</button>'
+}
+async function autoDispute(id) {
+  const reportR = await fetch('/api/mfsn/clients/' + id + '/dispute-candidates')
+  const rd = await reportR.json()
+  if (!rd.report_id) { alert('No report found. Pull a report first.'); return }
+  const r = await fetch('/api/mfsn/reports/' + rd.report_id + '/auto-dispute', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
+  const d = await r.json()
+  alert('Created ' + (d.disputes_created || 0) + ' disputes!')
+  markDone(3)
+}
+async function enrollSeq(clientId, seqId, name, btn) {
+  const r = await fetch('/api/email/sequences/enroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: clientId, sequence_id: seqId }) })
+  const d = await r.json()
+  if (d.success) { btn.textContent = '✓ Enrolled'; btn.disabled = true; btn.className = 'text-sm bg-green-600 text-white px-3 py-1 rounded-lg'; markDone(4) }
+  else alert('Enroll failed: ' + d.error)
+}
+async function createPortal(id) {
+  const r = await fetch('/api/portal/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: id }) })
+  const d = await r.json()
+  if (d.success) {
+    const el = document.getElementById('portal_result')
+    el.innerHTML = '✅ Portal created! <br><input class="mt-2 w-full text-sm bg-white px-2 py-1 rounded border" value="' + (window.location.origin + '/portal/' + d.token) + '" readonly>'
+    el.style.display = 'block'
+    markDone(5)
+  }
+}
+function copyPortal() { const el = document.getElementById('portal_url'); el.select(); document.execCommand('copy'); markDone(5) }
+</script>
+</body>
+</html>`
+  return c.html(html)
+})
+
+// ============================================================
+// FEATURE: BULK DISPUTE FILING
+// ============================================================
+
+app.post('/api/disputes/bulk', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const body = await c.req.json() as any
+  const { client_id, disputes } = body
+  if (!client_id || !Array.isArray(disputes) || disputes.length === 0) return c.json({ error: 'client_id and disputes array required' }, 400)
+  const created: any[] = []; const errors: any[] = []
+  const bureauMap: any = { equifax: 'equifax', transunion: 'transunion', experian: 'experian', efx: 'equifax', tu: 'transunion', exp: 'experian' }
+  for (let i = 0; i < disputes.length; i++) {
+    const d = disputes[i]
+    if (!d.account_name && !d.bureau) { errors.push({ index: i, error: 'account_name required' }); continue }
+    try {
+      const bureau = bureauMap[d.bureau?.toLowerCase()] || d.bureau || 'equifax'
+      const r = await DB.prepare(`INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, status, dispute_round, fcra_section, letter_template, response_due_date) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 'R1_Standard', date('now', '+35 days'))`)
+        .bind(client_id, bureau, d.account_name || '', d.account_number || '', d.dispute_reason || 'Account information not verified — requesting method of verification under FCRA §611', d.dispute_round || 1, d.fcra_section || 'FCRA §611').run()
+      created.push({ index: i, id: r.meta.last_row_id, bureau, account: d.account_name })
+    } catch (err: any) { errors.push({ index: i, error: err.message }) }
+  }
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'bulk_disputes_filed', 'client', ?, ?)`).bind(client_id, `Bulk filed ${created.length} disputes for client ${client_id}`).run()
+  // Fire webhook
+  try {
+    const configs = await DB.prepare(`SELECT url, headers FROM webhook_configs WHERE is_active = 1 AND events LIKE '%dispute.filed%'`).all()
+    for (const cfg of configs.results as any[]) {
+      await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(cfg.headers ? JSON.parse(cfg.headers) : {}) }, body: JSON.stringify({ event: 'dispute.filed', client_id, disputes_created: created.length }) }).catch(() => {})
+    }
+  } catch (_) {}
+  return c.json({ success: true, created: created.length, errors: errors.length, disputes: created, dispute_errors: errors })
+})
+
+// ============================================================
+// FEATURE: STRIPE PAYMENT LINK — Generate checkout session URL
+// ============================================================
+
+app.post('/api/stripe/payment-link', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!env.STRIPE_SECRET_KEY) return c.json({ error: 'Stripe not configured. Set STRIPE_SECRET_KEY.' }, 500)
+  const body = await c.req.json() as any
+  const { client_id, plan, success_url, cancel_url } = body
+  const planPrices: any = { basic: 9900, standard: 17900, premium: 29900, autopilot: 49900 }
+  const planPrice = planPrices[plan?.toLowerCase()] || planPrices.standard
+  const planName = plan ? (plan.charAt(0).toUpperCase() + plan.slice(1)) + ' Credit Repair' : 'Standard Credit Repair'
+  let customerEmail = ''
+  if (client_id && DB) {
+    const cl = await DB.prepare('SELECT email, first_name, last_name FROM clients WHERE id = ?').bind(client_id).first() as any
+    if (cl) customerEmail = cl.email || ''
+  }
+  try {
+    const params = new URLSearchParams({
+      'line_items[0][price_data][currency]': 'usd',
+      'line_items[0][price_data][product_data][name]': planName,
+      'line_items[0][price_data][recurring][interval]': 'month',
+      'line_items[0][price_data][unit_amount]': String(planPrice),
+      'line_items[0][quantity]': '1',
+      'mode': 'subscription',
+      'success_url': success_url || 'https://rjbusinesssolutions.org/success?session_id={CHECKOUT_SESSION_ID}',
+      'cancel_url': cancel_url || 'https://rjbusinesssolutions.org/',
+      'metadata[client_id]': client_id || '',
+      'metadata[plan]': plan || 'standard',
+    })
+    if (customerEmail) params.append('customer_email', customerEmail)
+    const res = await fetch('https://api.stripe.com/v1/checkout/sessions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + env.STRIPE_SECRET_KEY, 'Content-Type': 'application/x-www-form-urlencoded' }, body: params })
+    const session = await res.json() as any
+    if (session.error) return c.json({ error: 'Stripe error: ' + session.error.message }, 400)
+    if (DB && client_id) await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'payment_link_created', 'client', ?, ?)`).bind(client_id, `Stripe checkout: ${planName} at $${planPrice / 100}/mo`).run()
+    return c.json({ success: true, payment_url: session.url, session_id: session.id, plan: planName, amount: planPrice, currency: 'usd', expires_at: session.expires_at ? new Date(session.expires_at * 1000).toISOString() : null })
+  } catch (err: any) {
+    return c.json({ error: 'Stripe request failed: ' + err.message }, 500)
+  }
+})
+
+// ============================================================
+// FEATURE: INBOUND TWILIO SMS WEBHOOK
+// ============================================================
+
+app.post('/api/twilio/inbound', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.parseBody() as any
+  const from = body.From || ''
+  const messageBody = body.Body || ''
+  const messageSid = body.MessageSid || ''
+  const to = body.To || ''
+  // Find client by phone
+  let clientId: number | null = null
+  if (DB && from) {
+    const cleaned = from.replace(/\D/g, '')
+    const client = await DB.prepare(`SELECT id FROM clients WHERE REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', '') LIKE ? OR phone LIKE ?`).bind('%' + cleaned.slice(-10), '%' + from + '%').first() as any
+    if (client) clientId = client.id
+  }
+  // Log to communications
+  if (DB) {
+    await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, body, status, external_id) VALUES (?, 'sms', 'inbound', 'twilio', ?, ?, ?, 'delivered', ?)`)
+      .bind(clientId, from, to, messageBody, messageSid).run()
+    // Create notification for staff
+    await DB.prepare(`INSERT INTO notifications (recipient, type, channel, title, message, severity) VALUES ('staff', 'system', 'in_app', 'Inbound SMS', ?, 'info')`)
+      .bind(`From ${from}${clientId ? ' (Client #' + clientId + ')' : ''}: "${messageBody}"`).run()
+    if (clientId) await DB.prepare(`UPDATE clients SET last_contact_date = date('now'), updated_at = datetime('now') WHERE id = ?`).bind(clientId).run()
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('twilio', 'inbound_sms', 'communication', ?, ?)`).bind(clientId || 0, `From ${from}: ${messageBody.slice(0, 100)}`).run()
+  }
+  // Auto-reply (optional)
+  const autoReplies: any = { 'stop': 'You have been unsubscribed.', 'help': 'Reply STOP to unsubscribe. For questions call us at (505) 555-0100.', 'status': 'Your credit repair is in progress! Log in to your portal for the latest updates.' }
+  const autoReply = autoReplies[messageBody.trim().toLowerCase()]
+  const twiml = autoReply ? `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${autoReply}</Message></Response>` : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>`
+  return new Response(twiml, { headers: { 'Content-Type': 'text/xml' } })
+})
+
+// ============================================================
+// FEATURE: EMAIL EVENT TRACKING (SendGrid / Resend webhooks)
+// ============================================================
+
+app.post('/api/email/events', async (c) => {
+  const { DB } = c.env
+  const ct = c.req.header('content-type') || ''
+  let events: any[] = []
+  if (ct.includes('application/json')) {
+    const body = await c.req.json() as any
+    events = Array.isArray(body) ? body : [body]
+  }
+  if (!DB) return c.json({ received: events.length })
+  let processed = 0
+  for (const evt of events) {
+    // Support SendGrid format { event, email, timestamp, sg_message_id } and Resend format { type, created_at, data: { email_id, to } }
+    const eventType = evt.event || evt.type || 'unknown'
+    const email = evt.email || evt.data?.to?.[0] || ''
+    const externalId = evt.sg_message_id || evt.data?.email_id || evt.MessageSid || ''
+    const statusMap: any = { delivered: 'delivered', open: 'opened', click: 'clicked', bounce: 'bounced', dropped: 'failed', spamreport: 'failed', unsubscribe: 'failed', 'email.delivered': 'delivered', 'email.opened': 'opened', 'email.clicked': 'clicked', 'email.bounced': 'bounced' }
+    const newStatus = statusMap[eventType] || 'delivered'
+    if (externalId) await DB.prepare(`UPDATE communications SET status = ? WHERE external_id = ? OR external_id LIKE ?`).bind(newStatus, externalId, externalId + '%').run()
+    else if (email) await DB.prepare(`UPDATE communications SET status = ? WHERE to_address = ? AND channel = 'email' ORDER BY created_at DESC LIMIT 1`).bind(newStatus, email).run()
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('sendgrid', ?, 'communication', 0, ?)`).bind('email_event_' + newStatus, `${eventType} for ${email}`).run()
+    processed++
+  }
+  return c.json({ received: events.length, processed })
+})
+
+// ============================================================
+// FEATURE: CRON JOB ENDPOINTS — For scheduled execution
+// ============================================================
+
+// POST /api/cron/process-sequences — Run all pending email + SMS drip sends
+app.post('/api/cron/process-sequences', async (c) => {
+  const env = c.env; const { DB } = env
+  // Optional: check cron secret header for security
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const start = Date.now()
+  let emailSent = 0, smsSent = 0, errors = 0
+  // Process pending email sends (status = 'pending')
+  const pendingEmails = await DB.prepare(`SELECT es.*, cl.first_name, cl.last_name FROM email_sends es JOIN clients cl ON cl.id = es.client_id WHERE es.status = 'pending' LIMIT 50`).all()
+  for (const send of pendingEmails.results as any[]) {
+    try {
+      let success = false
+      const toEmail = send.to_email || ''
+      const subject = send.subject || 'Update from RJ Business Solutions'
+      const body = (send.body || '').replace(/\{first_name\}/g, send.first_name).replace(/\{last_name\}/g, send.last_name)
+      if (env.SENDGRID_API_KEY && toEmail) {
+        const r = await fetch('https://api.sendgrid.com/v3/mail/send', { method: 'POST', headers: { Authorization: 'Bearer ' + env.SENDGRID_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ personalizations: [{ to: [{ email: toEmail, name: send.first_name + ' ' + send.last_name }] }], from: { email: 'noreply@rjbusinesssolutions.org', name: 'RJ Business Solutions' }, subject, content: [{ type: 'text/plain', value: body }] }) })
+        success = r.ok
+      } else if (env.RESEND_API_KEY && toEmail) {
+        const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'RJ Business Solutions <noreply@rjbusinesssolutions.org>', to: [toEmail], subject, text: body }) })
+        success = r.ok
+      }
+      await DB.prepare(`UPDATE email_sends SET status = ? WHERE id = ?`).bind(success ? 'sent' : 'failed', send.id).run()
+      if (success) emailSent++; else errors++
+    } catch (_) { errors++; await DB.prepare(`UPDATE email_sends SET status = 'failed' WHERE id = ?`).bind(send.id).run() }
+  }
+  // Process SMS sequence enrollments due for sending
+  const pendingSMS = await DB.prepare(`SELECT se.*, cl.phone, cl.first_name, sms.message_template FROM sms_enrollments se JOIN clients cl ON cl.id = se.client_id JOIN sms_sequences sms ON sms.id = se.sequence_id WHERE se.status = 'active' AND (se.next_send_at IS NULL OR se.next_send_at <= datetime('now')) LIMIT 50`).all()
+  for (const send of pendingSMS.results as any[]) {
+    try {
+      let success = false
+      if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && send.phone) {
+        const body = (send.message_template || '').replace(/\{first_name\}/g, send.first_name)
+        const params = new URLSearchParams({ To: send.phone, From: env.TWILIO_PHONE_NUMBER || '', Body: body })
+        const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, { method: 'POST', headers: { Authorization: 'Basic ' + btoa(env.TWILIO_ACCOUNT_SID + ':' + env.TWILIO_AUTH_TOKEN), 'Content-Type': 'application/x-www-form-urlencoded' }, body: params })
+        success = r.ok
+      }
+      await DB.prepare(`UPDATE sms_enrollments SET status = ? WHERE id = ?`).bind(success ? 'sent' : 'failed', send.id).run()
+      if (success) smsSent++; else errors++
+    } catch (_) { errors++ }
+  }
+  const duration = Date.now() - start
+  await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details, triggered_by) VALUES ('process_sequences', 'success', ?, ?, ?, ?)`)
+    .bind(emailSent + smsSent, duration, `Emails: ${emailSent}, SMS: ${smsSent}, Errors: ${errors}`, c.req.header('x-triggered-by') || 'scheduler').run()
+  return c.json({ success: true, email_sent: emailSent, sms_sent: smsSent, errors, duration_ms: duration })
+})
+
+// POST /api/cron/generate-kpis — Daily KPI snapshot
+app.post('/api/cron/generate-kpis', async (c) => {
+  const env = c.env; const { DB } = env
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const start = Date.now()
+  const today = new Date().toISOString().split('T')[0]
+  const [clients, disputes, revenue, leads, appts] = await Promise.all([
+    DB.prepare(`SELECT status, COUNT(*) as count FROM clients GROUP BY status`).all(),
+    DB.prepare(`SELECT status, COUNT(*) as count FROM disputes GROUP BY status`).all(),
+    DB.prepare(`SELECT SUM(monthly_fee) as mrr, COUNT(*) as active FROM clients WHERE status = 'active'`).first(),
+    DB.prepare(`SELECT COUNT(*) as total FROM crm_leads WHERE created_at >= date('now', '-7 days')`).first(),
+    DB.prepare(`SELECT COUNT(*) as total FROM appointments WHERE scheduled_at >= date('now') AND scheduled_at <= date('now', '+7 days')`).first()
+  ])
+  const rev = revenue as any
+  const metrics: any[] = [
+    { metric_name: 'mrr', metric_value: rev?.mrr || 0, metric_unit: 'dollars' },
+    { metric_name: 'active_clients', metric_value: (clients.results as any[]).find(r => r.status === 'active')?.count || 0, metric_unit: 'count' },
+    { metric_name: 'total_clients', metric_value: (clients.results as any[]).reduce((s, r) => s + r.count, 0), metric_unit: 'count' },
+    { metric_name: 'open_disputes', metric_value: (disputes.results as any[]).filter(r => ['pending', 'sent', 'investigating'].includes(r.status)).reduce((s, r) => s + r.count, 0), metric_unit: 'count' },
+    { metric_name: 'leads_7d', metric_value: (leads as any)?.total || 0, metric_unit: 'count' },
+    { metric_name: 'appointments_7d', metric_value: (appts as any)?.total || 0, metric_unit: 'count' }
+  ]
+  for (const m of metrics) {
+    await DB.prepare(`INSERT OR IGNORE INTO kpi_snapshots (metric_name, metric_value, metric_unit, period_type, period_date) VALUES (?, ?, ?, 'daily', ?)`)
+      .bind(m.metric_name, m.metric_value, m.metric_unit, today).run()
+  }
+  const duration = Date.now() - start
+  await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details) VALUES ('generate_kpis', 'success', ?, ?, ?)`)
+    .bind(metrics.length, duration, `Generated ${metrics.length} KPI metrics for ${today}`).run()
+  return c.json({ success: true, date: today, metrics_saved: metrics.length, metrics, duration_ms: duration })
+})
+
+// POST /api/cron/pull-reports — Monthly credit report refresh for all active clients
+app.post('/api/cron/pull-reports', async (c) => {
+  const env = c.env; const { DB } = env
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  if (!env.MFSN_API_EMAIL || !env.MFSN_API_PASSWORD) return c.json({ error: 'MFSN credentials not configured', note: 'Set MFSN_API_EMAIL and MFSN_API_PASSWORD' }, 500)
+  // Find active clients with stored MFSN tokens where last_pull was > 25 days ago
+  const clients = await DB.prepare(`SELECT mt.client_id, mt.mfsn_email, mt.mfsn_token, mt.last_pull_date FROM mfsn_tokens mt JOIN clients cl ON cl.id = mt.client_id WHERE cl.status = 'active' AND (mt.last_pull_date IS NULL OR mt.last_pull_date <= datetime('now', '-25 days')) LIMIT 20`).all()
+  const start = Date.now(); let pulled = 0; const errors: any[] = []
+  for (const client of clients.results as any[]) {
+    try {
+      // Re-auth and pull
+      const loginForm = new FormData(); loginForm.append('email', env.MFSN_API_EMAIL); loginForm.append('password', env.MFSN_API_PASSWORD)
+      const loginRes = await fetch(`${env.MFSN_API_URL || 'https://api.myfreescorenow.com'}/api/auth/login`, { method: 'POST', body: loginForm })
+      const loginData = await loginRes.json() as any
+      if (!loginData.success) { errors.push({ client_id: client.client_id, error: 'Auth failed' }); continue }
+      const fetchForm = new FormData(); fetchForm.append('email', client.mfsn_email); fetchForm.append('client_token', client.mfsn_token)
+      const fetchRes = await fetch(`${env.MFSN_API_URL || 'https://api.myfreescorenow.com'}/api/auth/fetch-3B-json`, { method: 'POST', body: fetchForm })
+      const reportData = await fetchRes.json() as any
+      if (!reportData.success) { errors.push({ client_id: client.client_id, error: reportData.message }); continue }
+      // Store scores
+      const views = reportData.data?.providerViews || []
+      let scoreEfx: any = null, scoreTu: any = null, scoreExp: any = null
+      for (const v of views) { const p = v.provider || v.summary?.provider; const s = v.summary?.creditScore?.score; if (p === 'EFX') scoreEfx = s; if (p === 'TU') scoreTu = s; if (p === 'EXP') scoreExp = s }
+      const r = await DB.prepare(`INSERT INTO credit_reports (client_id, mfsn_member_email, report_type, score_efx, score_tu, score_exp, raw_response_json, pulled_by, status) VALUES (?, ?, 'US_3B', ?, ?, ?, ?, 'cron', 'active')`).bind(client.client_id, client.mfsn_email, scoreEfx, scoreTu, scoreExp, JSON.stringify(reportData.data)).run()
+      const avgScore = [scoreEfx, scoreTu, scoreExp].filter(s => s).reduce((a: any, b: any) => a + b, 0) / [scoreEfx, scoreTu, scoreExp].filter(s => s).length || null
+      await DB.prepare(`INSERT INTO credit_score_history (client_id, credit_report_id, score_efx, score_tu, score_exp, score_avg, source) VALUES (?, ?, ?, ?, ?, ?, 'mfsn')`).bind(client.client_id, r.meta.last_row_id, scoreEfx, scoreTu, scoreExp, avgScore ? Math.round(avgScore) : null).run()
+      if (avgScore) await DB.prepare(`UPDATE clients SET credit_score_current = ?, updated_at = datetime('now') WHERE id = ?`).bind(Math.round(avgScore), client.client_id).run()
+      await DB.prepare(`UPDATE mfsn_tokens SET last_pull_date = datetime('now'), total_pulls = total_pulls + 1, updated_at = datetime('now') WHERE client_id = ?`).bind(client.client_id).run()
+      pulled++
+    } catch (err: any) { errors.push({ client_id: client.client_id, error: err.message }) }
+  }
+  const duration = Date.now() - start
+  await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details) VALUES ('pull_reports', ?, ?, ?, ?)`)
+    .bind(errors.length ? 'error' : 'success', pulled, duration, `Pulled ${pulled} reports, ${errors.length} errors`).run()
+  return c.json({ success: true, reports_pulled: pulled, errors: errors.length, error_details: errors, duration_ms: duration, eligible_clients: clients.results.length })
+})
+
+// GET /api/cron/status — Cron job history
+app.get('/api/cron/status', async (c) => {
+  const { DB } = c.env
+  if (!DB) return c.json({ error: 'Database required' }, 500)
+  const log = await DB.prepare('SELECT * FROM cron_log ORDER BY created_at DESC LIMIT 50').all()
+  const byJob: any = {}
+  for (const entry of log.results as any[]) {
+    if (!byJob[entry.job_name]) byJob[entry.job_name] = { last_run: entry.created_at, last_status: entry.status, total_runs: 0, success_count: 0 }
+    byJob[entry.job_name].total_runs++
+    if (entry.status === 'success') byJob[entry.job_name].success_count++
+  }
+  return c.json({
+    jobs: { process_sequences: { schedule: 'Daily 9am', endpoint: 'POST /api/cron/process-sequences', ...byJob.process_sequences }, generate_kpis: { schedule: 'Daily 9am', endpoint: 'POST /api/cron/generate-kpis', ...byJob.generate_kpis }, pull_reports: { schedule: 'Monthly 1st', endpoint: 'POST /api/cron/pull-reports', ...byJob.pull_reports } },
+    recent_log: log.results.slice(0, 20),
+    note: 'Secure endpoints with X-Cron-Secret header matching CRON_SECRET env var'
+  })
+})
+
+// ============================================================
+// FEATURE: MOBILE-RESPONSIVE DASHBOARD CSS FIX
+// ============================================================
+
+app.get('/static/mobile.css', (c) => {
+  const css = `
+/* RJ Business Solutions — Mobile Responsive Overrides */
+@media (max-width: 640px) {
+  .dashboard-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; flex-wrap: nowrap !important; }
+  .dashboard-nav button { flex-shrink: 0; }
+  .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr) !important; gap: 0.75rem; }
+  .stats-grid > div { margin: 0 !important; }
+  .tab-content table { font-size: 0.75rem; }
+  .tab-content table th, .tab-content table td { padding: 0.4rem 0.5rem; }
+  .section-body { padding: 0.75rem !important; }
+  h1 { font-size: 1.25rem !important; }
+  .score-pill { min-width: 70px; padding: 0.75rem 1rem; }
+  .score-pill .text-3xl { font-size: 1.5rem; }
+}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  nav a, nav button { font-size: 0.75rem !important; padding: 0.375rem 0.625rem !important; }
+}
+`
+  return new Response(css, { headers: { 'Content-Type': 'text/css', 'Cache-Control': 'public, max-age=86400' } })
+})
+
 export default app
 

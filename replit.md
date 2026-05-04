@@ -14,14 +14,37 @@ A full-stack credit repair business operations platform + complete SaaS infrastr
 - **Styling**: Tailwind CSS (CDN in dev)
 
 ## Stats
-- **173 route handlers** across 26 feature groups
-- **5,162 lines** of TypeScript in `src/index.tsx`
-- **31 database tables** across 5 migrations
+- **190 route handlers** across 28 feature groups
+- **6,238 lines** of TypeScript in `src/index.tsx`
+- **33 database tables** across 6 migrations
 - **90 environment variables** across 12 categories
 - **62 SOPs** across 7 phases
 - **239+ templates** in `src/templates.ts`
 - **6 email sequences** + **5 SMS sequences** (seeded)
 - **4 staff users** (seeded)
+
+## New Features (Migration 0006)
+- **Staff Auth** — `/login` page, `POST /api/auth/login` (SHA-256 + D1 sessions, HTTPOnly cookie, 8hr expiry), logout, `/api/auth/me`, `/api/auth/sessions`
+- **Client Detail Page** — `GET /clients/:id` — full SSR dashboard with score cards, dispute table, MFSN section, quick-file modal, schedule call, portal generation, edit form, report history, communications log
+- **Dispute Letter Printer** — `GET /dispute/letter/:disputeId` — print-ready FCRA dispute letter with bureau addresses, FCRA citations, round-specific escalation language, print button
+- **Client Onboarding Wizard** — `GET /onboarding/:clientId` — 6-step guided wizard: client info → CROA disclosure → pull report → dispute plan → email sequences → portal setup
+- **Bulk Dispute Filing** — `POST /api/disputes/bulk` — create disputes for multiple accounts/bureaus in one API call
+- **Stripe Payment Link** — `POST /api/stripe/payment-link` — generates Stripe Checkout Session URL per client/plan (requires STRIPE_SECRET_KEY)
+- **Inbound Twilio Webhook** — `POST /api/twilio/inbound` — handles incoming SMS, logs to communications, creates staff notification, auto-replies for STOP/HELP/STATUS
+- **Email Event Tracking** — `POST /api/email/events` — SendGrid/Resend webhook handler for open/click/bounce/deliver events, updates communication status
+- **Cron Jobs** — `POST /api/cron/process-sequences` (email+SMS drip), `POST /api/cron/generate-kpis` (daily KPI snapshot), `POST /api/cron/pull-reports` (monthly MFSN refresh), `GET /api/cron/status`
+- **Mobile CSS** — `GET /static/mobile.css` — responsive overrides for phones
+
+## Auth Notes
+- Login at `/login` — form POST to `POST /api/auth/login`
+- Password: env var `ADMIN_PASSWORD` (default: `rjbs2026`)
+- Sessions stored in `staff_sessions` D1 table, 8hr expiry, HTTPOnly cookie `rjbs_session`
+- All staff must exist in `staff_users` table with `is_active = 1`
+
+## Cron Job Setup
+Secure endpoints with `X-Cron-Secret` header matching `CRON_SECRET` env var. Use cron-job.org, Cloudflare Workers Cron, or any HTTP scheduler:
+- Daily 9am → `POST /api/cron/process-sequences` + `POST /api/cron/generate-kpis`
+- Monthly 1st → `POST /api/cron/pull-reports` (requires MFSN credentials)
 
 ## Project Structure
 ```
