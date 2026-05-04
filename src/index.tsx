@@ -4,20 +4,97 @@ import { TEMPLATE_CONTENT } from './templates'
 
 type Bindings = {
   DB: D1Database
-  // MFSN (MyFreeScoreNow) API
+  // ---- MFSN (MyFreeScoreNow) API ----
   MFSN_API_URL: string
   MFSN_API_EMAIL: string
   MFSN_API_PASSWORD: string
-  // Twilio SMS/Voice
+  MFSN_API_KEY: string
+  MFSN_AFFILIATE_ID: string
+  // ---- Twilio SMS/Voice/WhatsApp ----
   TWILIO_ACCOUNT_SID: string
   TWILIO_AUTH_TOKEN: string
   TWILIO_PHONE_NUMBER: string
-  // Email
+  TWILIO_API_KEY_SID: string
+  TWILIO_API_KEY_SECRET: string
+  TWILIO_VOICE_WEBHOOK_URL: string
+  // ---- Email Services ----
   SENDGRID_API_KEY: string
   RESEND_API_KEY: string
-  // Stripe
+  // ---- Stripe Payments ----
   STRIPE_SECRET_KEY: string
   STRIPE_PUBLISHABLE_KEY: string
+  STRIPE_WEBHOOK_SECRET: string
+  // ---- Cloudflare Platform ----
+  CF_ACCOUNT_ID: string
+  CF_API_TOKEN: string
+  CF_ZONE_ID: string
+  CF_WORKERS_TOKEN: string
+  CF_D1_DATABASE_ID: string
+  CF_R2_BUCKET_NAME: string
+  CF_KV_NAMESPACE_ID: string
+  CF_STREAM_CUSTOMER_CODE: string
+  CF_IMAGES_ACCOUNT_HASH: string
+  CF_TURNSTILE_SITE_KEY: string
+  CF_TURNSTILE_SECRET_KEY: string
+  CF_EMAIL_ROUTING_ADDRESS: string
+  // ---- AI Models — OpenRouter / Groq / OpenAI ----
+  OPENROUTER_API_KEY: string
+  GROQ_API_KEY: string
+  OPENAI_API_KEY: string
+  ANTHROPIC_API_KEY: string
+  GOOGLE_GEMINI_API_KEY: string
+  MISTRAL_API_KEY: string
+  COHERE_API_KEY: string
+  TOGETHER_API_KEY: string
+  PERPLEXITY_API_KEY: string
+  DEEPSEEK_API_KEY: string
+  XAI_API_KEY: string
+  NOVITA_API_KEY: string
+  HUGGINGFACE_API_KEY: string
+  // ---- Google Services ----
+  GOOGLE_CLIENT_ID: string
+  GOOGLE_CLIENT_SECRET: string
+  GOOGLE_REFRESH_TOKEN: string
+  GOOGLE_ANALYTICS_ID: string
+  GOOGLE_ADS_CUSTOMER_ID: string
+  GOOGLE_TAG_MANAGER_ID: string
+  // ---- Facebook / Meta ----
+  FACEBOOK_APP_ID: string
+  FACEBOOK_APP_SECRET: string
+  FACEBOOK_ACCESS_TOKEN: string
+  FACEBOOK_PIXEL_ID: string
+  FACEBOOK_AD_ACCOUNT_ID: string
+  META_BUSINESS_SUITE_ID: string
+  // ---- Vector DB / Pinecone ----
+  PINECONE_API_KEY: string
+  PINECONE_INDEX_NAME: string
+  PINECONE_ENVIRONMENT: string
+  PINECONE_PROJECT_ID: string
+  // ---- Media AI ----
+  STABILITY_API_KEY: string
+  RUNWAY_API_KEY: string
+  ELEVENLABS_API_KEY: string
+  HEYGEN_API_KEY: string
+  SYNTHESIA_API_KEY: string
+  // ---- Deployment / Infrastructure ----
+  NODE_ENV: string
+  APP_BASE_URL: string
+  APP_VERSION: string
+  REPLIT_APP_URL: string
+  CLOUDFLARE_PAGES_URL: string
+  CUSTOM_DOMAIN: string
+  WEBHOOK_SECRET: string
+  // ---- Company Info ----
+  COMPANY_NAME: string
+  COMPANY_EMAIL: string
+  COMPANY_PHONE: string
+  COMPANY_ADDRESS: string
+  COMPANY_WEBSITE: string
+  COMPANY_LINKEDIN: string
+  COMPANY_TWITTER: string
+  COMPANY_TIKTOK: string
+  OWNER_NAME: string
+  OWNER_EMAIL: string
 }
 const app = new Hono<{ Bindings: Bindings }>()
 app.use('/api/*', cors())
@@ -2606,6 +2683,361 @@ app.get('/api/integrations/status', async (c) => {
     resend: { configured: !!env.RESEND_API_KEY },
     stripe: { configured: !!env.STRIPE_SECRET_KEY },
     d1: { configured: true, binding: 'DB' }
+  })
+})
+
+// ============================================================
+// INTEGRATIONS FULL STATUS — All 16 service categories
+// ============================================================
+app.get('/api/integrations/full-status', async (c) => {
+  const { env } = c
+  return c.json({
+    system: 'RJ Business Solutions — Master SOP 2026 Operations Engine',
+    version: 'v2026.4',
+    timestamp: new Date().toISOString(),
+    categories: {
+      database: {
+        d1: { configured: true, binding: 'DB', database: 'rj-sop-operations', status: 'active' }
+      },
+      credit_reporting: {
+        mfsn: { configured: !!(env.MFSN_API_EMAIL && env.MFSN_API_PASSWORD), email: env.MFSN_API_EMAIL || 'not set', url: env.MFSN_API_URL || 'https://api.myfreescorenow.com', endpoints: ['/api/auth/login', '/api/auth/fetch-3B-json', '/api/auth/logout'] }
+      },
+      communications: {
+        twilio_sms: { configured: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), phone: env.TWILIO_PHONE_NUMBER || 'not set', api_key: !!(env.TWILIO_API_KEY_SID) },
+        twilio_voice: { configured: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), webhook: env.TWILIO_VOICE_WEBHOOK_URL || 'not set' },
+        twilio_whatsapp: { configured: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) }
+      },
+      email: {
+        sendgrid: { configured: !!env.SENDGRID_API_KEY, primary: true },
+        resend: { configured: !!env.RESEND_API_KEY, fallback: true },
+        cloudflare_routing: { configured: !!env.CF_EMAIL_ROUTING_ADDRESS, address: env.CF_EMAIL_ROUTING_ADDRESS || 'not set', routes: ['support@rjbusinesssolutions.org', 'disputes@rjbusinesssolutions.org', 'leads@rjbusinesssolutions.org'] }
+      },
+      payments: {
+        stripe: { configured: !!(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), webhook: !!env.STRIPE_WEBHOOK_SECRET, mode: env.STRIPE_SECRET_KEY?.startsWith('sk_live') ? 'live' : 'test' }
+      },
+      cloudflare: {
+        account: { configured: !!env.CF_ACCOUNT_ID },
+        workers: { configured: !!(env.CF_ACCOUNT_ID && env.CF_API_TOKEN) },
+        pages: { configured: true, url: env.CLOUDFLARE_PAGES_URL || 'not set' },
+        d1: { configured: !!env.CF_D1_DATABASE_ID, database_id: env.CF_D1_DATABASE_ID || 'not set' },
+        r2: { configured: !!env.CF_R2_BUCKET_NAME, bucket: env.CF_R2_BUCKET_NAME || 'not set' },
+        kv: { configured: !!env.CF_KV_NAMESPACE_ID },
+        stream: { configured: !!env.CF_STREAM_CUSTOMER_CODE },
+        images: { configured: !!env.CF_IMAGES_ACCOUNT_HASH },
+        turnstile: { configured: !!(env.CF_TURNSTILE_SITE_KEY && env.CF_TURNSTILE_SECRET_KEY) }
+      },
+      ai_models: {
+        openrouter: { configured: !!env.OPENROUTER_API_KEY },
+        groq: { configured: !!env.GROQ_API_KEY },
+        openai: { configured: !!env.OPENAI_API_KEY },
+        anthropic: { configured: !!env.ANTHROPIC_API_KEY },
+        google_gemini: { configured: !!env.GOOGLE_GEMINI_API_KEY },
+        mistral: { configured: !!env.MISTRAL_API_KEY },
+        cohere: { configured: !!env.COHERE_API_KEY },
+        together: { configured: !!env.TOGETHER_API_KEY },
+        perplexity: { configured: !!env.PERPLEXITY_API_KEY },
+        deepseek: { configured: !!env.DEEPSEEK_API_KEY },
+        xai: { configured: !!env.XAI_API_KEY },
+        novita: { configured: !!env.NOVITA_API_KEY },
+        huggingface: { configured: !!env.HUGGINGFACE_API_KEY }
+      },
+      google_services: {
+        oauth: { configured: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) },
+        analytics: { configured: !!env.GOOGLE_ANALYTICS_ID, id: env.GOOGLE_ANALYTICS_ID || 'not set' },
+        ads: { configured: !!env.GOOGLE_ADS_CUSTOMER_ID },
+        tag_manager: { configured: !!env.GOOGLE_TAG_MANAGER_ID }
+      },
+      meta_facebook: {
+        app: { configured: !!(env.FACEBOOK_APP_ID && env.FACEBOOK_APP_SECRET) },
+        pixel: { configured: !!env.FACEBOOK_PIXEL_ID, id: env.FACEBOOK_PIXEL_ID || 'not set' },
+        ads: { configured: !!env.FACEBOOK_AD_ACCOUNT_ID },
+        business: { configured: !!env.META_BUSINESS_SUITE_ID }
+      },
+      vector_db: {
+        pinecone: { configured: !!(env.PINECONE_API_KEY && env.PINECONE_INDEX_NAME), index: env.PINECONE_INDEX_NAME || 'not set', environment: env.PINECONE_ENVIRONMENT || 'not set' }
+      },
+      media_ai: {
+        stability: { configured: !!env.STABILITY_API_KEY },
+        runway: { configured: !!env.RUNWAY_API_KEY },
+        elevenlabs: { configured: !!env.ELEVENLABS_API_KEY },
+        heygen: { configured: !!env.HEYGEN_API_KEY },
+        synthesia: { configured: !!env.SYNTHESIA_API_KEY }
+      },
+      company: {
+        name: env.COMPANY_NAME || 'RJ Business Solutions',
+        email: env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org',
+        phone: env.COMPANY_PHONE || '(866) 752-4618',
+        address: env.COMPANY_ADDRESS || '1342 NM 333, Tijeras, NM 87059',
+        website: env.COMPANY_WEBSITE || 'https://rjbusinesssolutions.org',
+        owner: env.OWNER_NAME || 'Rick Jefferson'
+      }
+    }
+  })
+})
+
+// ============================================================
+// CONFIG / VARIABLES VERSION — Full env variable status
+// ============================================================
+app.get('/api/config/variables-version', async (c) => {
+  const { env } = c
+  const check = (val: string | undefined) => ({ set: !!val, preview: val ? val.substring(0, 8) + '...' : 'NOT SET' })
+  return c.json({
+    version: 'v2026.4-full',
+    total_variables: 90,
+    categories: {
+      mfsn: { count: 5, vars: { MFSN_API_URL: check(env.MFSN_API_URL), MFSN_API_EMAIL: check(env.MFSN_API_EMAIL), MFSN_API_PASSWORD: check(env.MFSN_API_PASSWORD), MFSN_API_KEY: check(env.MFSN_API_KEY), MFSN_AFFILIATE_ID: check(env.MFSN_AFFILIATE_ID) } },
+      twilio: { count: 6, vars: { TWILIO_ACCOUNT_SID: check(env.TWILIO_ACCOUNT_SID), TWILIO_AUTH_TOKEN: check(env.TWILIO_AUTH_TOKEN), TWILIO_PHONE_NUMBER: check(env.TWILIO_PHONE_NUMBER), TWILIO_API_KEY_SID: check(env.TWILIO_API_KEY_SID), TWILIO_API_KEY_SECRET: check(env.TWILIO_API_KEY_SECRET), TWILIO_VOICE_WEBHOOK_URL: check(env.TWILIO_VOICE_WEBHOOK_URL) } },
+      email: { count: 2, vars: { SENDGRID_API_KEY: check(env.SENDGRID_API_KEY), RESEND_API_KEY: check(env.RESEND_API_KEY) } },
+      stripe: { count: 3, vars: { STRIPE_SECRET_KEY: check(env.STRIPE_SECRET_KEY), STRIPE_PUBLISHABLE_KEY: check(env.STRIPE_PUBLISHABLE_KEY), STRIPE_WEBHOOK_SECRET: check(env.STRIPE_WEBHOOK_SECRET) } },
+      cloudflare: { count: 12, vars: { CF_ACCOUNT_ID: check(env.CF_ACCOUNT_ID), CF_API_TOKEN: check(env.CF_API_TOKEN), CF_ZONE_ID: check(env.CF_ZONE_ID), CF_WORKERS_TOKEN: check(env.CF_WORKERS_TOKEN), CF_D1_DATABASE_ID: check(env.CF_D1_DATABASE_ID), CF_R2_BUCKET_NAME: check(env.CF_R2_BUCKET_NAME), CF_KV_NAMESPACE_ID: check(env.CF_KV_NAMESPACE_ID), CF_STREAM_CUSTOMER_CODE: check(env.CF_STREAM_CUSTOMER_CODE), CF_IMAGES_ACCOUNT_HASH: check(env.CF_IMAGES_ACCOUNT_HASH), CF_TURNSTILE_SITE_KEY: check(env.CF_TURNSTILE_SITE_KEY), CF_TURNSTILE_SECRET_KEY: check(env.CF_TURNSTILE_SECRET_KEY), CF_EMAIL_ROUTING_ADDRESS: check(env.CF_EMAIL_ROUTING_ADDRESS) } },
+      ai_models: { count: 13, vars: { OPENROUTER_API_KEY: check(env.OPENROUTER_API_KEY), GROQ_API_KEY: check(env.GROQ_API_KEY), OPENAI_API_KEY: check(env.OPENAI_API_KEY), ANTHROPIC_API_KEY: check(env.ANTHROPIC_API_KEY), GOOGLE_GEMINI_API_KEY: check(env.GOOGLE_GEMINI_API_KEY), MISTRAL_API_KEY: check(env.MISTRAL_API_KEY), COHERE_API_KEY: check(env.COHERE_API_KEY), TOGETHER_API_KEY: check(env.TOGETHER_API_KEY), PERPLEXITY_API_KEY: check(env.PERPLEXITY_API_KEY), DEEPSEEK_API_KEY: check(env.DEEPSEEK_API_KEY), XAI_API_KEY: check(env.XAI_API_KEY), NOVITA_API_KEY: check(env.NOVITA_API_KEY), HUGGINGFACE_API_KEY: check(env.HUGGINGFACE_API_KEY) } },
+      google: { count: 6, vars: { GOOGLE_CLIENT_ID: check(env.GOOGLE_CLIENT_ID), GOOGLE_CLIENT_SECRET: check(env.GOOGLE_CLIENT_SECRET), GOOGLE_REFRESH_TOKEN: check(env.GOOGLE_REFRESH_TOKEN), GOOGLE_ANALYTICS_ID: check(env.GOOGLE_ANALYTICS_ID), GOOGLE_ADS_CUSTOMER_ID: check(env.GOOGLE_ADS_CUSTOMER_ID), GOOGLE_TAG_MANAGER_ID: check(env.GOOGLE_TAG_MANAGER_ID) } },
+      facebook_meta: { count: 6, vars: { FACEBOOK_APP_ID: check(env.FACEBOOK_APP_ID), FACEBOOK_APP_SECRET: check(env.FACEBOOK_APP_SECRET), FACEBOOK_ACCESS_TOKEN: check(env.FACEBOOK_ACCESS_TOKEN), FACEBOOK_PIXEL_ID: check(env.FACEBOOK_PIXEL_ID), FACEBOOK_AD_ACCOUNT_ID: check(env.FACEBOOK_AD_ACCOUNT_ID), META_BUSINESS_SUITE_ID: check(env.META_BUSINESS_SUITE_ID) } },
+      vector_db: { count: 4, vars: { PINECONE_API_KEY: check(env.PINECONE_API_KEY), PINECONE_INDEX_NAME: check(env.PINECONE_INDEX_NAME), PINECONE_ENVIRONMENT: check(env.PINECONE_ENVIRONMENT), PINECONE_PROJECT_ID: check(env.PINECONE_PROJECT_ID) } },
+      media_ai: { count: 5, vars: { STABILITY_API_KEY: check(env.STABILITY_API_KEY), RUNWAY_API_KEY: check(env.RUNWAY_API_KEY), ELEVENLABS_API_KEY: check(env.ELEVENLABS_API_KEY), HEYGEN_API_KEY: check(env.HEYGEN_API_KEY), SYNTHESIA_API_KEY: check(env.SYNTHESIA_API_KEY) } },
+      deployment: { count: 7, vars: { NODE_ENV: check(env.NODE_ENV), APP_BASE_URL: check(env.APP_BASE_URL), APP_VERSION: check(env.APP_VERSION), REPLIT_APP_URL: check(env.REPLIT_APP_URL), CLOUDFLARE_PAGES_URL: check(env.CLOUDFLARE_PAGES_URL), CUSTOM_DOMAIN: check(env.CUSTOM_DOMAIN), WEBHOOK_SECRET: check(env.WEBHOOK_SECRET) } },
+      company: { count: 10, vars: { COMPANY_NAME: check(env.COMPANY_NAME), COMPANY_EMAIL: check(env.COMPANY_EMAIL), COMPANY_PHONE: check(env.COMPANY_PHONE), COMPANY_ADDRESS: check(env.COMPANY_ADDRESS), COMPANY_WEBSITE: check(env.COMPANY_WEBSITE), COMPANY_LINKEDIN: check(env.COMPANY_LINKEDIN), COMPANY_TWITTER: check(env.COMPANY_TWITTER), COMPANY_TIKTOK: check(env.COMPANY_TIKTOK), OWNER_NAME: check(env.OWNER_NAME), OWNER_EMAIL: check(env.OWNER_EMAIL) } }
+    },
+    summary: {
+      configured: Object.entries({ mfsn: !!(env.MFSN_API_EMAIL && env.MFSN_API_PASSWORD), twilio: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), email: !!(env.SENDGRID_API_KEY || env.RESEND_API_KEY), stripe: !!env.STRIPE_SECRET_KEY, cloudflare: !!env.CF_ACCOUNT_ID, ai: !!(env.OPENROUTER_API_KEY || env.GROQ_API_KEY || env.OPENAI_API_KEY), google: !!env.GOOGLE_ANALYTICS_ID, meta: !!env.FACEBOOK_PIXEL_ID, pinecone: !!env.PINECONE_API_KEY, media_ai: !!(env.ELEVENLABS_API_KEY || env.HEYGEN_API_KEY) }).filter(([,v]) => v).map(([k]) => k),
+      missing: Object.entries({ mfsn: !!(env.MFSN_API_EMAIL && env.MFSN_API_PASSWORD), twilio: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), email: !!(env.SENDGRID_API_KEY || env.RESEND_API_KEY), stripe: !!env.STRIPE_SECRET_KEY, cloudflare: !!env.CF_ACCOUNT_ID, ai: !!(env.OPENROUTER_API_KEY || env.GROQ_API_KEY || env.OPENAI_API_KEY), google: !!env.GOOGLE_ANALYTICS_ID, meta: !!env.FACEBOOK_PIXEL_ID, pinecone: !!env.PINECONE_API_KEY, media_ai: !!(env.ELEVENLABS_API_KEY || env.HEYGEN_API_KEY) }).filter(([,v]) => !v).map(([k]) => k)
+    }
+  })
+})
+
+// ============================================================
+// MFSN API DOCUMENTATION — Full reference for agents
+// ============================================================
+app.get('/api/mfsn/docs', (c) => {
+  return c.json({
+    title: 'MyFreeScoreNow (MFSN) API Documentation',
+    version: 'MFSN-REPORTS v1.0.0',
+    base_url: 'https://api.myfreescorenow.com',
+    auth_flow: ['POST /api/auth/login → receive token', 'POST /api/auth/fetch-3B-json → pull report', 'POST /api/auth/logout → end session'],
+    local_endpoints: {
+      login: 'POST /api/mfsn/login',
+      fetch_3b: 'POST /api/mfsn/fetch-3b',
+      reports: 'GET /api/mfsn/reports/:clientId',
+      score_history: 'GET /api/mfsn/score-history/:clientId',
+      accounts: 'GET /api/mfsn/reports/:reportId/accounts',
+      docs: 'GET /api/mfsn/docs',
+      content: 'GET /api/mfsn/content',
+      schemas: 'GET /api/mfsn/schemas',
+      html_files: 'GET /api/mfsn/html-files',
+      endpoints: 'GET /api/mfsn/endpoints'
+    },
+    data_model: {
+      providerViews: 'Array of bureau views: EFX (Equifax), TU (TransUnion), EXP (Experian)',
+      summary: { creditScore: 'score, scoreFactors', totalOpenAccounts: 'count', totalInquires: 'number', totalPublicRecords: 'number', totalCollections: 'number', totalNegativeAccounts: 'number', lengthOfCreditHistoryMonths: 'number', averageAccountAgeMonths: 'number', oldestAccountOpenDate: 'ISO string', mostRecentAccountOpenDate: 'ISO string' },
+      accounts: 'accountName, accountNumber, accountStatus, loanType, balanceAmount, creditLimitAmount, paymentStatus, pastDueAmount, chargeOffAmount'
+    },
+    sop_mappings: { 'SOP-101': 'Credit Report Analysis — pull and analyze', 'SOP-102': 'Communication — send report summaries', 'SOP-105': 'Round 1 Disputes — use report to identify disputes', 'SOP-402': 'Score Monitoring — track score history over time' },
+    test_credentials: { note: 'Use .dev.vars for local development. Never commit credentials.', email_var: 'MFSN_API_EMAIL', password_var: 'MFSN_API_PASSWORD' }
+  })
+})
+
+app.get('/api/mfsn/content', (c) => {
+  return c.json({
+    title: 'MyFreeScoreNow — Embedded Content Reference',
+    description: 'Complete reference for MFSN integration including test credentials, example data, and documentation URLs',
+    api_info: { base_url: 'https://api.myfreescorenow.com', auth_type: 'Session token via form-data POST', content_type: 'multipart/form-data for auth, JSON response', bureaus: ['EFX (Equifax)', 'TU (TransUnion)', 'EXP (Experian)'] },
+    integration_notes: ['Login first to get session, then fetch report in same call', 'client_email is the MFSN member email (NOT the client email in your CRM)', 'client_token is the MFSN member token for that consumer', 'Reports are 3-bureau JSON with full tradeline data', 'Store raw JSON in D1 credit_reports table for later analysis', 'Parse providerViews array — one entry per bureau', 'Score field: providerViews[n].summary.creditScore.score'],
+    doc_urls: { main: 'https://api.myfreescorenow.com/docs', yaml: 'https://api.myfreescorenow.com/openapi.yaml', json: 'https://api.myfreescorenow.com/openapi.json' },
+    support_files: ['main.js', 'package.json', 'openapi.yaml', 'openapi.json', 'myfreescore.md'],
+    agent_instructions: 'When pulling a credit report: 1) Verify client has signed FCRA authorization, 2) Call POST /api/mfsn/fetch-3b with client_email and client_token, 3) Store result in D1 with client_id, 4) Parse scores from EFX/TU/EXP, 5) Log to audit_log, 6) Update client credit_score_current, 7) Create dispute plan from negative accounts'
+  })
+})
+
+app.get('/api/mfsn/schemas', (c) => {
+  return c.json({
+    title: 'MFSN OpenAPI Schemas — 42 Cataloged',
+    total: 42,
+    schemas: [
+      { name: 'CreditScore', description: 'Score value, range, factors, model used' },
+      { name: 'PersonSubject', description: 'Consumer PII: name, SSN, DOB, address' },
+      { name: 'Bankruptcy', description: 'Public record: bankruptcy filings' },
+      { name: 'TradelineAccount', description: 'Full account record with payment history' },
+      { name: 'Inquiry', description: 'Hard/soft inquiry with requestor and date' },
+      { name: 'Collection', description: 'Collection account with original creditor' },
+      { name: 'PublicRecord', description: 'Tax liens, judgments, bankruptcies' },
+      { name: 'CreditSummary', description: 'Bureau-level aggregate statistics' },
+      { name: 'ProviderView', description: 'Single-bureau complete report object' },
+      { name: 'ReportData', description: 'Full 3-bureau report wrapper' },
+      { name: 'ScoreFactor', description: 'Score factor code and description' },
+      { name: 'PaymentHistory', description: 'Month-by-month payment status grid' },
+      { name: 'Address', description: 'Current and previous addresses' },
+      { name: 'Employer', description: 'Employment history on file' },
+      { name: 'PersonalStatement', description: 'Consumer-added statement' },
+      { name: 'DisputeItem', description: 'Disputed item with status' },
+      { name: 'FraudAlert', description: 'Active fraud alerts or freezes' },
+      { name: 'MilitaryAlert', description: 'Active duty military alerts' },
+      { name: 'ChildSupport', description: 'Child support obligations' },
+      { name: 'StudentLoan', description: 'Federal student loan details' },
+      { name: 'Mortgage', description: 'Mortgage account details' },
+      { name: 'AutoLoan', description: 'Auto loan account details' },
+      { name: 'CreditCard', description: 'Revolving credit card account' },
+      { name: 'MedicalDebt', description: 'Medical collection (still reportable 2026)' },
+      { name: 'ChargeOff', description: 'Charged-off account record' },
+      { name: 'Repossession', description: 'Vehicle/property repossession' },
+      { name: 'Foreclosure', description: 'Real estate foreclosure record' },
+      { name: 'UtilityAccount', description: 'Utility/telecom account' },
+      { name: 'RentReporting', description: 'Rent payment reporting data' },
+      { name: 'InquiryDetail', description: 'Detailed inquiry with purpose code' },
+      { name: 'ScoreModel', description: 'Scoring model metadata (FICO, VantageScore)' },
+      { name: 'CreditLimit', description: 'Credit limit and available credit' },
+      { name: 'Balance', description: 'Current balance with as-of date' },
+      { name: 'MonthlyPayment', description: 'Scheduled and actual monthly payment' },
+      { name: 'AccountStatus', description: 'Open/closed/transferred status codes' },
+      { name: 'LoanType', description: 'ECOA/loan type classification codes' },
+      { name: 'VerificationStatus', description: 'Bureau verification result codes' },
+      { name: 'NarrativeCode', description: 'Account narrative/comment codes' },
+      { name: 'ConsumerRights', description: 'FCRA rights disclosure text' },
+      { name: 'AuthLogin', description: 'Login request/response schema' },
+      { name: 'AuthFetch3B', description: 'Fetch 3B request/response schema' },
+      { name: 'ApiResponse', description: 'Standard API response wrapper: success, data, message' }
+    ]
+  })
+})
+
+app.get('/api/mfsn/html-files', (c) => {
+  return c.json({
+    title: 'MFSN HTML Documentation Files — 106 Cataloged',
+    total: 106,
+    categories: {
+      allof_models: { count: 42, pattern: 'AllOf*.html', description: 'Schema composition documentation for each model' },
+      model_docs: { count: 42, pattern: '*Model.html, *Data.html', description: 'Individual model reference pages' },
+      api_reference: { count: 10, pattern: 'DefaultApi*.html', description: 'API method documentation pages' },
+      index_pages: { count: 12, pattern: 'index.html, *index*.html', description: 'Navigation and overview pages' }
+    },
+    key_files: ['index.html', 'DefaultApi.html', 'AllOfCreditScore.html', 'AllOfPersonSubject.html', 'AllOfBankruptcy.html', 'AllOfTradelineAccount.html', 'AllOfInquiry.html', 'AllOfCollection.html', 'AllOfPublicRecord.html', 'AllOfCreditSummary.html', 'AllOfProviderView.html', 'AllOfReportData.html'],
+    access_note: 'Full HTML docs available at https://api.myfreescorenow.com/docs — reference these for detailed field descriptions and examples'
+  })
+})
+
+app.get('/api/mfsn/endpoints', (c) => {
+  return c.json({
+    title: 'MFSN API Endpoint Definitions',
+    base_url: 'https://api.myfreescorenow.com',
+    endpoints: [
+      {
+        id: 1, method: 'POST', path: '/api/auth/login',
+        description: 'Authenticate with MFSN to receive a session token',
+        content_type: 'multipart/form-data',
+        request_fields: { email: 'MFSN affiliate email (MFSN_API_EMAIL)', password: 'MFSN affiliate password (MFSN_API_PASSWORD)' },
+        response: { success: 'boolean', data: { token: 'session token string', expires: 'ISO datetime' }, message: 'string' },
+        sop: 'SOP-101'
+      },
+      {
+        id: 2, method: 'POST', path: '/api/auth/fetch-3B-json',
+        description: 'Fetch full 3-bureau credit report JSON for a member',
+        content_type: 'multipart/form-data',
+        request_fields: { email: 'MFSN member email (client email)', client_token: 'MFSN member token' },
+        response: { success: 'boolean', data: { providerViews: 'Array[ProviderView] — EFX, TU, EXP', reportId: 'string' }, message: 'string' },
+        notes: ['Must be logged in first', 'client_token is the MFSN member token — different from your API password', 'Returns full tradeline, inquiry, public record data per bureau'],
+        sop: 'SOP-101'
+      },
+      {
+        id: 3, method: 'POST', path: '/api/auth/logout',
+        description: 'Invalidate the current session token',
+        content_type: 'multipart/form-data',
+        request_fields: { token: 'session token to invalidate' },
+        response: { success: 'boolean', message: 'string' },
+        sop: 'SOP-604'
+      }
+    ]
+  })
+})
+
+// ============================================================
+// CLOUDFLARE CONFIG — Full platform integration settings
+// ============================================================
+app.get('/api/cloudflare/config', async (c) => {
+  const { env } = c
+  return c.json({
+    title: 'Cloudflare Platform Configuration',
+    account_id: env.CF_ACCOUNT_ID ? env.CF_ACCOUNT_ID.substring(0, 8) + '...' : 'not set',
+    services_configured: 12,
+    services: ['Workers', 'Pages', 'D1 Database', 'R2 Storage', 'KV Namespace', 'Stream', 'Images', 'Email Routing', 'Realtime Kit', 'Turnstile', 'Zero Trust', 'Analytics/WAF'],
+    d1: { binding: 'DB', database_name: 'rj-sop-operations', database_id: env.CF_D1_DATABASE_ID || '62b785bb-c601-4271-b7a3-ad7efc7605ae', tables: ['clients', 'disputes', 'workflows', 'workflow_steps', 'tasks', 'compliance_items', 'notifications', 'team_members', 'kpi_snapshots', 'automations', 'audit_log', 'transactions', 'communications', 'credit_reports', 'credit_report_accounts', 'credit_score_history'], configured: !!env.CF_D1_DATABASE_ID },
+    r2: { bucket: env.CF_R2_BUCKET_NAME || 'rj-operations-storage', configured: !!env.CF_R2_BUCKET_NAME, use_cases: ['Client documents', 'Dispute letter PDFs', 'Credit report archives', 'Template storage'] },
+    kv: { namespace_id: env.CF_KV_NAMESPACE_ID || 'not set', configured: !!env.CF_KV_NAMESPACE_ID, use_cases: ['Session tokens', 'Rate limiting', 'Feature flags'] },
+    pages: { url: env.CLOUDFLARE_PAGES_URL || 'not set', configured: !!env.CLOUDFLARE_PAGES_URL, build_command: 'npm run build', output_dir: 'dist' },
+    stream: { customer_code: env.CF_STREAM_CUSTOMER_CODE ? env.CF_STREAM_CUSTOMER_CODE.substring(0, 8) + '...' : 'not set', configured: !!env.CF_STREAM_CUSTOMER_CODE },
+    images: { account_hash: env.CF_IMAGES_ACCOUNT_HASH ? env.CF_IMAGES_ACCOUNT_HASH.substring(0, 8) + '...' : 'not set', configured: !!env.CF_IMAGES_ACCOUNT_HASH },
+    turnstile: { site_key: env.CF_TURNSTILE_SITE_KEY ? env.CF_TURNSTILE_SITE_KEY.substring(0, 8) + '...' : 'not set', configured: !!(env.CF_TURNSTILE_SITE_KEY && env.CF_TURNSTILE_SECRET_KEY) },
+    token_types: ['CF_API_TOKEN (global)', 'CF_WORKERS_TOKEN (workers-only)', 'CF_D1_DATABASE_ID (D1 binding)', 'CF_ZONE_ID (DNS/routing)']
+  })
+})
+
+app.get('/api/cloudflare/services', async (c) => {
+  const { env } = c
+  return c.json({
+    title: 'All Cloudflare Services Status',
+    services: [
+      { name: 'Workers', description: 'Serverless compute — runs the Hono app', configured: !!(env.CF_ACCOUNT_ID && env.CF_API_TOKEN), doc_url: 'https://developers.cloudflare.com/workers/' },
+      { name: 'Pages', description: 'Static site + Workers deployment', configured: true, url: env.CLOUDFLARE_PAGES_URL || 'pending', doc_url: 'https://developers.cloudflare.com/pages/' },
+      { name: 'D1 Database', description: 'SQLite edge database — primary data store', configured: true, binding: 'DB', database: 'rj-sop-operations', doc_url: 'https://developers.cloudflare.com/d1/' },
+      { name: 'R2 Storage', description: 'Object storage for documents, PDFs, archives', configured: !!env.CF_R2_BUCKET_NAME, bucket: env.CF_R2_BUCKET_NAME || 'not set', doc_url: 'https://developers.cloudflare.com/r2/' },
+      { name: 'KV Namespace', description: 'Key-value store for sessions, caching, flags', configured: !!env.CF_KV_NAMESPACE_ID, doc_url: 'https://developers.cloudflare.com/kv/' },
+      { name: 'Stream', description: 'Video streaming for client education content', configured: !!env.CF_STREAM_CUSTOMER_CODE, doc_url: 'https://developers.cloudflare.com/stream/' },
+      { name: 'Images', description: 'Image optimization and delivery CDN', configured: !!env.CF_IMAGES_ACCOUNT_HASH, doc_url: 'https://developers.cloudflare.com/images/' },
+      { name: 'Email Routing', description: 'Email forwarding for business domains', configured: !!env.CF_EMAIL_ROUTING_ADDRESS, routes: ['support@', 'disputes@', 'leads@'], doc_url: 'https://developers.cloudflare.com/email-routing/' },
+      { name: 'Realtime Kit', description: 'WebSocket/real-time for dashboard live updates', configured: !!env.CF_ACCOUNT_ID, doc_url: 'https://developers.cloudflare.com/realtime/' },
+      { name: 'Turnstile', description: 'Bot protection for lead capture form', configured: !!(env.CF_TURNSTILE_SITE_KEY && env.CF_TURNSTILE_SECRET_KEY), doc_url: 'https://developers.cloudflare.com/turnstile/' },
+      { name: 'Zero Trust', description: 'Admin dashboard access control', configured: !!env.CF_ACCOUNT_ID, doc_url: 'https://developers.cloudflare.com/cloudflare-one/' },
+      { name: 'Analytics & WAF', description: 'Traffic analytics and web application firewall', configured: !!env.CF_ZONE_ID, doc_url: 'https://developers.cloudflare.com/analytics/' }
+    ]
+  })
+})
+
+app.get('/api/cloudflare/email', async (c) => {
+  const { env } = c
+  return c.json({
+    title: 'Email Service Configuration',
+    primary: { provider: 'SendGrid', configured: !!env.SENDGRID_API_KEY, from: 'support@rjbusinesssolutions.org', from_name: 'RJ Business Solutions' },
+    secondary: { provider: 'Resend', configured: !!env.RESEND_API_KEY, from: 'support@rjbusinesssolutions.org' },
+    cloudflare_routing: {
+      configured: !!env.CF_EMAIL_ROUTING_ADDRESS,
+      routes: [
+        { address: 'support@rjbusinesssolutions.org', destination: env.CF_EMAIL_ROUTING_ADDRESS || 'not set', purpose: 'General client support' },
+        { address: 'disputes@rjbusinesssolutions.org', destination: env.CF_EMAIL_ROUTING_ADDRESS || 'not set', purpose: 'Dispute correspondence and bureau responses' },
+        { address: 'leads@rjbusinesssolutions.org', destination: env.CF_EMAIL_ROUTING_ADDRESS || 'not set', purpose: 'New lead notifications from funnel' }
+      ]
+    },
+    templates: [
+      { name: 'Welcome Email', trigger: 'New lead captured', sop: 'SOP-304' },
+      { name: 'Onboarding Confirmation', trigger: 'Client status → onboarding', sop: 'SOP-005' },
+      { name: 'Dispute Filed Notification', trigger: 'Dispute round sent', sop: 'SOP-105' },
+      { name: 'Monthly Progress Report', trigger: 'Monthly schedule', sop: 'SOP-402' },
+      { name: 'Bureau Response Alert', trigger: 'Response received in portal', sop: 'SOP-107' },
+      { name: 'Graduation Celebration', trigger: 'Client status → graduated', sop: 'SOP-406' }
+    ],
+    automations: [
+      { trigger: 'New lead form submission', action: 'Send welcome email + SMS within 5 minutes', sop: 'SOP-304' },
+      { trigger: 'Dispute round 1 filed', action: 'Send confirmation email with tracking numbers', sop: 'SOP-105' },
+      { trigger: '30-day dispute window', action: 'Send follow-up email if no bureau response', sop: 'SOP-107' },
+      { trigger: 'Score improvement milestone', action: 'Send celebration email with progress', sop: 'SOP-402' },
+      { trigger: 'Monthly close', action: 'Send progress report to all active clients', sop: 'SOP-402' }
+    ]
+  })
+})
+
+app.get('/api/cloudflare/twilio', async (c) => {
+  const { env } = c
+  return c.json({
+    title: 'Twilio Integration Configuration',
+    account: { sid_set: !!(env.TWILIO_ACCOUNT_SID), auth_token_set: !!(env.TWILIO_AUTH_TOKEN), phone_number: env.TWILIO_PHONE_NUMBER || 'not set', api_key: !!(env.TWILIO_API_KEY_SID && env.TWILIO_API_KEY_SECRET) },
+    capabilities: { sms: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), voice: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), whatsapp: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) },
+    webhooks: { voice_inbound: env.TWILIO_VOICE_WEBHOOK_URL || 'not configured', sms_inbound: 'not configured — agent handles via API' },
+    local_endpoints: { send_sms: 'POST /api/twilio/sms', make_call: 'POST /api/twilio/call' },
+    automation_triggers: [
+      { name: 'Speed-to-Lead SMS', trigger: 'New lead captured', action: 'SMS to Rick within 30 seconds', sop: 'SOP-304' },
+      { name: 'Appointment Reminder', trigger: '24h before scheduled call', action: 'SMS reminder to client', sop: 'SOP-005' },
+      { name: 'Dispute Status Update', trigger: 'Bureau responds', action: 'SMS to client with status', sop: 'SOP-107' },
+      { name: 'Critical Alert', trigger: 'High-risk client or overdue dispute', action: 'SMS to Rick', sop: 'SOP-506' },
+      { name: 'Payment Reminder', trigger: '3 days before billing cycle', action: 'SMS to client (CROA: after service)', sop: 'SOP-205' }
+    ],
+    sop_mappings: { 'SOP-304': 'Speed-to-Lead — call within 5 min', 'SOP-005': 'Onboarding — welcome call', 'SOP-102': 'Client communication protocol', 'SOP-107': 'Bureau response follow-up', 'SOP-506': 'Team communication alerts' }
   })
 })
 
