@@ -3176,49 +3176,46 @@ app.get('/api/communications', async (c) => {
 // ============================================================
 
 // Send email via SendGrid
+// /api/email/sendgrid kept for route compat — now routes through Resend
 app.post('/api/email/sendgrid', async (c) => {
+  return c.req.raw.clone().arrayBuffer().then(async () => {
+    const env = c.env; const { DB } = env
+    const { to, subject, html_body, text_body, body, client_id, template_name, sop_id } = await c.req.json() as any
+    if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
+    if (!env.RESEND_API_KEY) return c.json({ error: 'Resend not configured — check RESEND_API_KEY in .dev.vars' }, 500)
+    const finalBody = html_body || body || text_body || subject
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org'}>`,
+          to: [to],
+          subject,
+          ...(html_body ? { html: html_body } : { text: finalBody })
+        })
+      })
+      if (!res.ok) { const e = await res.text().catch(() => ''); console.error('Resend error', res.status, e) }
+      if (DB) {
+        await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, body, status, template_name, sop_id) VALUES (?, 'email', 'outbound', 'resend', ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(client_id || null, env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', to, subject, finalBody, res.ok ? 'sent' : 'failed', template_name || null, sop_id || null).run()
+        await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'email_sent', 'communication', 0, ?)`)
+          .bind(`Resend email to ${to}: ${subject}`).run()
+      }
+      return c.json({ success: res.ok, status: res.status, provider: 'resend' })
+    } catch (err: any) {
+      return c.json({ error: 'Email failed: ' + (err.message || 'Unknown') }, 500)
+    }
+  })
+})
+
+// Send email via Resend (primary provider)
+app.post('/api/email/resend', async (c) => {
   const env = c.env; const { DB } = env
   const { to, subject, html_body, text_body, body, client_id, template_name, sop_id } = await c.req.json() as any
   if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
-  if (!env.SENDGRID_API_KEY) return c.json({ error: 'SendGrid not configured — verify SENDGRID_API_KEY and sender domain at sendgrid.com' }, 500)
+  if (!env.RESEND_API_KEY) return c.json({ error: 'Resend not configured — check RESEND_API_KEY' }, 500)
   const finalBody = html_body || body || text_body || subject
-  try {
-    const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        personalizations: [{ to: [{ email: to }] }],
-        from: { email: env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' },
-        subject,
-        content: [
-          { type: html_body ? 'text/html' : 'text/plain', value: finalBody }
-        ]
-      })
-    })
-    // Log detailed error for debugging
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '')
-      console.error('SendGrid error', res.status, errText)
-    }
-
-    if (DB) {
-      await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, body, status, template_name, sop_id) VALUES (?, 'email', 'outbound', 'sendgrid', 'support@rjbusinesssolutions.org', ?, ?, ?, ?, ?, ?)`)
-        .bind(client_id || null, to, subject, html_body || text_body || '', res.ok ? 'sent' : 'failed', template_name || null, sop_id || null).run()
-      await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system', 'email_sent', 'communication', 0, ?)`)
-        .bind(`Email to ${to}: ${subject}`).run()
-    }
-    return c.json({ success: res.ok, status: res.status })
-  } catch (err: any) {
-    return c.json({ error: 'SendGrid failed: ' + (err.message || 'Unknown') }, 500)
-  }
-})
-
-// Send email via Resend
-app.post('/api/email/resend', async (c) => {
-  const { DB, env } = c
-  const { to, subject, html_body, text_body, client_id, template_name, sop_id } = await c.req.json() as any
-  if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
-  if (!env.RESEND_API_KEY) return c.json({ error: 'Resend not configured' }, 500)
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -3269,29 +3266,23 @@ app.post('/api/speed-to-lead', async (c) => {
     } catch (err: any) { results.push({ channel: 'sms', success: false, error: err.message }) }
   }
 
-  // Send welcome email via Resend (or SendGrid as fallback)
+  // Send welcome email via Resend
   if (email) {
     const emailHtml = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><img src="https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg" alt="RJ Business Solutions" style="width:80px;margin-bottom:20px"><h2 style="color:#1e3a8a">Welcome, ${first_name || 'Friend'}!</h2><p>Thank you for reaching out to <strong>RJ Business Solutions</strong>. A credit repair specialist will contact you within <strong>5 minutes</strong>.</p><p>In the meantime, here's what to expect:</p><ul><li>Free credit report analysis across all 3 bureaus</li><li>Personalized dispute strategy</li><li>FCRA-compliant dispute filing</li><li>AI-powered monitoring with 3 dedicated agents</li></ul><p><strong>No upfront fees — we only bill after services are performed.</strong></p><hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0"><p style="font-size:12px;color:#9ca3af">RJ Business Solutions | 1342 NM 333, Tijeras, NM 87059<br><a href="https://rjbusinesssolutions.org">rjbusinesssolutions.org</a> | (866) 752-4618</p></div>`
     try {
-      const provider = env.RESEND_API_KEY ? 'resend' : 'sendgrid'
       let emailSuccess = false
       if (env.RESEND_API_KEY) {
         const res = await fetch('https://api.resend.com/emails', {
           method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: 'RJ Business Solutions <support@rjbusinesssolutions.org>', to: [email], subject: `${first_name || 'Welcome'} — Your Credit Repair Journey Starts Now`, html: emailHtml })
+          body: JSON.stringify({ from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org'}>`, to: [email], subject: `${first_name || 'Welcome'} — Your Credit Repair Journey Starts Now`, html: emailHtml })
         })
         emailSuccess = res.ok
-      } else if (env.SENDGRID_API_KEY) {
-        const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
-          method: 'POST', headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ personalizations: [{ to: [{ email }] }], from: { email: 'support@rjbusinesssolutions.org', name: 'RJ Business Solutions' }, subject: `${first_name || 'Welcome'} — Your Credit Repair Journey Starts Now`, content: [{ type: 'text/html', value: emailHtml }] })
-        })
-        emailSuccess = res.ok
+        if (!res.ok) { const e = await res.text().catch(() => ''); console.error('Resend speed-to-lead error', res.status, e) }
       }
-      results.push({ channel: 'email', success: emailSuccess, provider })
+      results.push({ channel: 'email', success: emailSuccess, provider: 'resend' })
       if (DB) {
-        await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, status, sop_id) VALUES (?, 'email', 'outbound', ?, 'support@rjbusinesssolutions.org', ?, 'Welcome — Credit Repair Journey', ?, 'SOP-304')`)
-          .bind(client_id || null, provider, email, emailSuccess ? 'sent' : 'failed').run()
+        await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, status, sop_id) VALUES (?, 'email', 'outbound', 'resend', ?, ?, 'Welcome — Credit Repair Journey', ?, 'SOP-304')`)
+          .bind(client_id || null, env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', email, emailSuccess ? 'sent' : 'failed').run()
       }
     } catch (err: any) { results.push({ channel: 'email', success: false, error: err.message }) }
   }
@@ -3336,8 +3327,8 @@ app.get('/api/integrations/full-status', async (c) => {
         twilio_whatsapp: { configured: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) }
       },
       email: {
-        sendgrid: { configured: !!env.SENDGRID_API_KEY, primary: true },
-        resend: { configured: !!env.RESEND_API_KEY, fallback: true },
+        resend: { configured: !!env.RESEND_API_KEY, primary: true },
+        cloudflare_email: { configured: !!env.CF_EMAIL_ROUTING_ADDRESS, fallback: true },
         cloudflare_routing: { configured: !!env.CF_EMAIL_ROUTING_ADDRESS, address: env.CF_EMAIL_ROUTING_ADDRESS || 'not set', routes: ['support@rjbusinesssolutions.org', 'disputes@rjbusinesssolutions.org', 'leads@rjbusinesssolutions.org'] }
       },
       payments: {
@@ -3622,8 +3613,8 @@ app.get('/api/cloudflare/email', async (c) => {
   const { env } = c
   return c.json({
     title: 'Email Service Configuration',
-    primary: { provider: 'SendGrid', configured: !!env.SENDGRID_API_KEY, from: 'support@rjbusinesssolutions.org', from_name: 'RJ Business Solutions' },
-    secondary: { provider: 'Resend', configured: !!env.RESEND_API_KEY, from: 'support@rjbusinesssolutions.org' },
+    primary: { provider: 'Resend', configured: !!env.RESEND_API_KEY, from: 'support@rjbusinesssolutions.org', from_name: 'RJ Business Solutions' },
+    secondary: { provider: 'Cloudflare Email Routing', configured: !!env.CF_EMAIL_ROUTING_ADDRESS, address: env.CF_EMAIL_ROUTING_ADDRESS || 'not set' },
     cloudflare_routing: {
       configured: !!env.CF_EMAIL_ROUTING_ADDRESS,
       routes: [
@@ -6098,11 +6089,8 @@ app.post('/api/cron/process-sequences', async (c) => {
       const toEmail = send.to_email || ''
       const subject = send.subject || 'Update from RJ Business Solutions'
       const body = (send.body || '').replace(/\{first_name\}/g, send.first_name).replace(/\{last_name\}/g, send.last_name)
-      if (env.SENDGRID_API_KEY && toEmail) {
-        const r = await fetch('https://api.sendgrid.com/v3/mail/send', { method: 'POST', headers: { Authorization: 'Bearer ' + env.SENDGRID_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ personalizations: [{ to: [{ email: toEmail, name: send.first_name + ' ' + send.last_name }] }], from: { email: 'noreply@rjbusinesssolutions.org', name: 'RJ Business Solutions' }, subject, content: [{ type: 'text/plain', value: body }] }) })
-        success = r.ok
-      } else if (env.RESEND_API_KEY && toEmail) {
-        const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'RJ Business Solutions <noreply@rjbusinesssolutions.org>', to: [toEmail], subject, text: body }) })
+      if (env.RESEND_API_KEY && toEmail) {
+        const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org'}>`, to: [toEmail], subject, text: body }) })
         success = r.ok
       }
       await DB.prepare(`UPDATE email_sends SET status = ? WHERE id = ?`).bind(success ? 'sent' : 'failed', send.id).run()
@@ -6270,22 +6258,14 @@ function genToken(len = 32): string {
 }
 
 // ============================================================
-// HELPER: Send email (SendGrid/Resend)
+// HELPER: Send email via Resend (primary)
 // ============================================================
 async function sendEmail(env: any, to: string, subject: string, text: string, html?: string): Promise<boolean> {
-  if (env.SENDGRID_API_KEY) {
-    const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ personalizations: [{ to: [{ email: to }] }], from: { email: env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' }, subject, content: [{ type: html ? 'text/html' : 'text/plain', value: html || text }] })
-    })
-    return r.ok
-  }
   if (env.RESEND_API_KEY) {
     const r = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org'}>`, to: [to], subject, html: html || `<pre>${text}</pre>` })
+      body: JSON.stringify({ from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'noreply@rjbusinesssolutions.org'}>`, to: [to], subject, ...(html ? { html } : { text }) })
     })
     return r.ok
   }
@@ -8615,10 +8595,10 @@ app.get('/agents', async (c) => {
   const COMM_CHANNELS = [
     { name: 'Twilio SMS', icon: '📱', status: commsKeys.twilio, desc: 'Outbound SMS to any client. Auto-fires on: lead capture, payment failure, dispute sent, score milestone', test_endpoint: '/api/twilio/sms' },
     { name: 'Twilio Voice', icon: '📞', status: commsKeys.twilio, desc: 'Outbound calls. Speed-to-lead: fires 5-min task + call on every new lead', test_endpoint: '/api/twilio/call' },
-    { name: 'SendGrid Email', icon: '📧', status: commsKeys.sendgrid, desc: 'Transactional + marketing email. Requires sender domain verified at sendgrid.com', test_endpoint: '/api/email/sendgrid' },
-    { name: 'Resend Email', icon: '📬', status: commsKeys.resend, desc: 'Backup email provider. Auto-fallback if SendGrid unavailable', test_endpoint: '/api/email/resend' },
+    { name: 'Resend Email', icon: '📧', status: commsKeys.resend, desc: 'Primary transactional + marketing email. Instant delivery, no domain verification headaches.', test_endpoint: '/api/email/resend' },
+    { name: 'Cloudflare Email Routing', icon: '📬', status: !!env.CF_EMAIL_ROUTING_ADDRESS, desc: 'Inbound email routing — support@, disputes@, leads@ all forwarded to your inbox via Cloudflare.', test_endpoint: null },
     { name: 'Click2Mail (Physical Mail)', icon: '✉️', status: commsKeys.click2mail, desc: 'Certified USPS mail for dispute letters. Every dispute letter mailed with tracking', test_endpoint: null },
-    { name: 'Speed-to-Lead', icon: '⚡', status: commsKeys.twilio || commsKeys.sendgrid, desc: 'Fires SMS + email + critical task to staff within 60 seconds of any new lead', test_endpoint: '/api/speed-to-lead' },
+    { name: 'Speed-to-Lead', icon: '⚡', status: commsKeys.twilio || commsKeys.resend, desc: 'Fires SMS + email + critical task to staff within 60 seconds of any new lead', test_endpoint: '/api/speed-to-lead' },
   ]
 
   return c.html(`<!DOCTYPE html><html lang="en"><head>
@@ -9035,7 +9015,7 @@ async function fireTestEmail() {
   show('test-panel-result', '⏳ Sending email...', 'text-yellow-300')
   const r = await fetch('/api/email/sendgrid', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ to: email, subject: '[TEST] RJ Business Solutions Agent Email', body: 'Live test from Agent Control Center. Email system confirmed working.' }) })
   const d = await r.json()
-  show('test-panel-result', (d.success ? '✓ EMAIL SENT to ' + email : '✗ EMAIL FAILED (status ' + d.status + '): ' + (d.error||'Check SENDGRID_API_KEY and verify sender domain at sendgrid.com')) + '\\n' + JSON.stringify(d), d.success ? 'text-green-300' : 'text-red-300')
+  show('test-panel-result', (d.success ? '✓ EMAIL SENT via Resend to ' + email : '✗ EMAIL FAILED (status ' + d.status + '): ' + (d.error||'Check RESEND_API_KEY')) + '\\n' + JSON.stringify(d), d.success ? 'text-green-300' : 'text-red-300')
 }
 </script>
 </body></html>`)
@@ -9341,17 +9321,17 @@ app.post('/api/signup/complete', async (c) => {
     } catch (_) {}
   }
 
-  // Send welcome email if SendGrid configured
-  if (env.SENDGRID_API_KEY && email) {
+  // Send welcome email via Resend
+  if (env.RESEND_API_KEY && email) {
     try {
-      await fetch('https://api.sendgrid.com/v3/mail/send', {
+      await fetch('https://api.resend.com/emails', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          personalizations: [{ to: [{ email, name: `${first_name} ${last_name}` }] }],
-          from: { email: env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' },
+          from: `${env.COMPANY_NAME || 'RJ Business Solutions'} <${env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org'}>`,
+          to: [email],
           subject: `Welcome to ${env.COMPANY_NAME||'RJ Business Solutions'} — You're on your way to ${score_goal}!`,
-          content: [{ type: 'text/html', value: `<h1>Welcome, ${first_name}!</h1><p>Your credit repair journey starts now. Here's what happens next:</p><ol><li>Upload your ID and proof of address to verify your identity</li><li>We'll pull your 3-bureau credit report automatically</li><li>Our AI will analyze your report and build your personalized roadmaps</li><li>Dispute letters will be prepared and sent within 5 business days</li></ol>${checkoutUrl ? `<p><a href="${checkoutUrl}" style="background:#2563eb;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Set Up Payment →</a></p>` : ''}<p><a href="https://${c.req.header('host')||'rjbusinesssolutions.org'}${portalUrl}" style="background:#059669;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Access Your Portal →</a></p><p style="font-size:12px;color:#666">You have a 3-day right of cancellation for a full refund. Email support@rjbusinesssolutions.org to cancel. RJ Business Solutions | 1342 NM 333, Tijeras, NM 87059 | (866) 752-4618</p>` }]
+          html: `<h1>Welcome, ${first_name}!</h1><p>Your credit repair journey starts now. Here's what happens next:</p><ol><li>Upload your ID and proof of address to verify your identity</li><li>We'll pull your 3-bureau credit report automatically</li><li>Our AI will analyze your report and build your personalized roadmaps</li><li>Dispute letters will be prepared and sent within 5 business days</li></ol>${checkoutUrl ? `<p><a href="${checkoutUrl}" style="background:#2563eb;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Set Up Payment →</a></p>` : ''}<p><a href="https://${c.req.header('host')||'rjbusinesssolutions.org'}${portalUrl}" style="background:#059669;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Access Your Portal →</a></p><p style="font-size:12px;color:#666">You have a 3-day right of cancellation for a full refund. Email support@rjbusinesssolutions.org to cancel. RJ Business Solutions | 1342 NM 333, Tijeras, NM 87059 | (866) 752-4618</p>`
         })
       })
     } catch (_) {}
