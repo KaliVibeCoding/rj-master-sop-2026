@@ -1,0 +1,721 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RJ Business Solutions — Master SOP 2026 API",
+    "version": "2026.1.0",
+    "description": "270-route credit repair SaaS API. Cloudflare Workers + Hono v4 + D1. All endpoints return JSON unless marked as SSR.",
+    "contact": {
+      "name": "RJ Business Solutions",
+      "email": "support@rjbusinesssolutions.org",
+      "url": "https://rjbusinesssolutions.org"
+    }
+  },
+  "servers": [
+    { "url": "https://app.rjbusinesssolutions.org", "description": "Production" },
+    { "url": "http://localhost:5000", "description": "Local Development" }
+  ],
+  "tags": [
+    { "name": "Signup", "description": "Self-service client acquisition flow" },
+    { "name": "Clients", "description": "Client CRM management" },
+    { "name": "Leads", "description": "Lead pipeline management" },
+    { "name": "Portal", "description": "Client-facing secure portal" },
+    { "name": "MFSN", "description": "MyFreeScoreNow credit report integration" },
+    { "name": "Disputes", "description": "Credit dispute management" },
+    { "name": "AI", "description": "AI analysis and agent execution" },
+    { "name": "SOP", "description": "Standard Operating Procedure execution" },
+    { "name": "Stripe", "description": "Payment processing and subscriptions" },
+    { "name": "Affiliates", "description": "Affiliate partner management" },
+    { "name": "Compliance", "description": "FCRA/CROA/FDCPA compliance engine" },
+    { "name": "Communications", "description": "Email, SMS, and phone automation" },
+    { "name": "Reports", "description": "Analysis reports and roadmaps" },
+    { "name": "Staff", "description": "Internal staff management and auth" },
+    { "name": "Cron", "description": "Automated job triggers" }
+  ],
+  "paths": {
+    "/signup": {
+      "get": {
+        "tags": ["Signup"],
+        "summary": "Self-service signup page",
+        "description": "SSR page. Full client acquisition flow with CROA disclosure, TCPA consent, plan selection, and Stripe payment setup. Supports ?plan=basic|standard|premium|autopilot and ?ref=AFFILIATE_CODE",
+        "parameters": [
+          { "name": "plan", "in": "query", "schema": { "type": "string", "enum": ["basic","standard","premium","autopilot"], "default": "standard" } },
+          { "name": "ref", "in": "query", "schema": { "type": "string" }, "description": "Affiliate referral code" }
+        ],
+        "responses": { "200": { "description": "HTML signup page with CROA disclosure form" } }
+      }
+    },
+    "/api/signup/complete": {
+      "post": {
+        "tags": ["Signup"],
+        "summary": "Complete self-service signup",
+        "description": "Creates client record, logs CROA signature, creates Stripe customer + Checkout Session, generates portal token, sends welcome SMS/email. All-in-one automated onboarding.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["first_name","last_name","email","croa_consent","terms_consent"],
+                "properties": {
+                  "first_name": { "type": "string" },
+                  "last_name": { "type": "string" },
+                  "email": { "type": "string", "format": "email" },
+                  "phone": { "type": "string" },
+                  "credit_score": { "type": "string", "description": "Current score estimate" },
+                  "score_goal": { "type": "string" },
+                  "primary_goal": { "type": "string" },
+                  "plan": { "type": "string", "enum": ["basic","standard","premium","autopilot"] },
+                  "ref": { "type": "string", "description": "Affiliate code" },
+                  "croa_consent": { "type": "string", "description": "Must be 'on' — CROA acknowledgment" },
+                  "terms_consent": { "type": "string", "description": "Must be 'on' — ToS agreement" },
+                  "tcpa_consent": { "type": "string", "description": "Optional SMS consent" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Account created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "client_id": { "type": "integer" },
+                    "checkout_url": { "type": "string", "description": "Stripe Checkout URL for payment setup" },
+                    "portal_url": { "type": "string", "description": "Client portal URL (fallback if no Stripe)" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Missing required fields" },
+          "409": { "description": "Email already registered" }
+        }
+      }
+    },
+    "/signup/success": {
+      "get": {
+        "tags": ["Signup"],
+        "summary": "Post-payment success page",
+        "parameters": [
+          { "name": "client_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Success page with next steps and portal link" } }
+      }
+    },
+    "/api/clients": {
+      "get": {
+        "tags": ["Clients"],
+        "summary": "List all clients",
+        "description": "Returns paginated list of clients with scores, status, and plan info",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": { "200": { "description": "Array of client objects" } }
+      },
+      "post": {
+        "tags": ["Clients"],
+        "summary": "Create client manually (admin)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["first_name","last_name","email"],
+                "properties": {
+                  "first_name": { "type": "string" },
+                  "last_name": { "type": "string" },
+                  "email": { "type": "string" },
+                  "phone": { "type": "string" },
+                  "plan": { "type": "string" },
+                  "credit_score_start": { "type": "integer" },
+                  "credit_score_goal": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created client with ID" } }
+      }
+    },
+    "/api/clients/{id}": {
+      "get": {
+        "tags": ["Clients"],
+        "summary": "Get single client",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Client object with full detail" }, "404": { "description": "Client not found" } }
+      },
+      "put": {
+        "tags": ["Clients"],
+        "summary": "Update client",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": { "200": { "description": "Updated client" } }
+      }
+    },
+    "/api/portal/generate": {
+      "post": {
+        "tags": ["Portal"],
+        "summary": "Generate client portal link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id"],
+                "properties": { "client_id": { "type": "integer" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ token, portal_url, expires_at }" } }
+      }
+    },
+    "/portal/{token}": {
+      "get": {
+        "tags": ["Portal"],
+        "summary": "Client portal dashboard (SSR)",
+        "description": "Full client-facing dashboard showing scores, disputes, documents, subscription. Time-limited token access.",
+        "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "HTML portal page" }, "401": { "description": "Invalid or expired token" } }
+      }
+    },
+    "/api/portal/upload-id": {
+      "post": {
+        "tags": ["Portal"],
+        "summary": "Upload identity verification document",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token","document_type"],
+                "properties": {
+                  "token": { "type": "string" },
+                  "document_type": { "type": "string", "enum": ["government_id","proof_of_address","ssn_card","bureau_response","account_statement","other"] },
+                  "file_data": { "type": "string", "description": "Base64 encoded file (goes to R2 in production)" },
+                  "file_name": { "type": "string" },
+                  "notes": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Document received, staff task created" }, "401": { "description": "Invalid token" } }
+      }
+    },
+    "/api/mfsn/fetch-3b": {
+      "post": {
+        "tags": ["MFSN"],
+        "summary": "Fetch 3-bureau credit report for client",
+        "description": "Pulls full 3-bureau report from MyFreeScoreNow using stored client credentials. Auto-triggers Hyperion analysis on import.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id"],
+                "properties": {
+                  "client_id": { "type": "integer" },
+                  "mfsn_username": { "type": "string" },
+                  "mfsn_password": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Report imported. Returns credit_report_id, scores, account count, and queued analysis_report_id." } }
+      }
+    },
+    "/api/mfsn/enroll": {
+      "post": {
+        "tags": ["MFSN"],
+        "summary": "Enroll client in MFSN credit monitoring",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id","first_name","last_name","ssn","dob","address"],
+                "properties": {
+                  "client_id": { "type": "integer" },
+                  "first_name": { "type": "string" },
+                  "last_name": { "type": "string" },
+                  "ssn": { "type": "string" },
+                  "dob": { "type": "string" },
+                  "address": { "type": "string" },
+                  "city": { "type": "string" },
+                  "state": { "type": "string" },
+                  "zip": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "MFSN token created, client linked to credit monitoring" } }
+      }
+    },
+    "/api/reports/analyze/{reportId}": {
+      "post": {
+        "tags": ["Reports"],
+        "summary": "Run Hyperion full analysis (12 AI agents)",
+        "description": "Triggers all 12 Hyperion AI agents in parallel. Saves to analysis_reports and generates 8 roadmaps in roadmap_results. Takes 60-120 seconds.",
+        "parameters": [{ "name": "reportId", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": {
+          "200": {
+            "description": "Full analysis results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "analysis_id": { "type": "integer" },
+                    "health_score": { "type": "integer", "description": "0-100" },
+                    "health_grade": { "type": "string", "enum": ["A","B","C","D","F"] },
+                    "roadmaps_generated": { "type": "integer" },
+                    "duration_ms": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reports/full/{clientId}": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "Full analysis SSR page (5 tabs)",
+        "description": "SSR page showing Executive Summary, All Roadmaps, Legal Audit, 90-Day Plan, Debt Analysis tabs",
+        "parameters": [{ "name": "clientId", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "HTML full analysis page with all tabs" } }
+      }
+    },
+    "/api/sop/list": {
+      "get": {
+        "tags": ["SOP"],
+        "summary": "List all 62 SOPs",
+        "responses": {
+          "200": {
+            "description": "SOP library",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "categories": { "type": "object" },
+                    "sops": { "type": "array" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sop/execute/{sopId}": {
+      "post": {
+        "tags": ["SOP"],
+        "summary": "Execute SOP with AI",
+        "description": "Runs an AI agent against the specified SOP with client context. Logs to sop_executions table.",
+        "parameters": [{ "name": "sopId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_id": { "type": "integer" },
+                  "context": { "type": "string" },
+                  "trigger_event": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ output, sop_title, execution_id, tokens_used, cost_cents, duration_ms }" } }
+      }
+    },
+    "/api/disputes": {
+      "get": {
+        "tags": ["Disputes"],
+        "summary": "List disputes",
+        "parameters": [
+          { "name": "client_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Array of dispute objects" } }
+      },
+      "post": {
+        "tags": ["Disputes"],
+        "summary": "Create dispute",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id","bureau","account_name","reason"],
+                "properties": {
+                  "client_id": { "type": "integer" },
+                  "bureau": { "type": "string", "enum": ["equifax","transunion","experian"] },
+                  "account_name": { "type": "string" },
+                  "account_number": { "type": "string" },
+                  "reason": { "type": "string" },
+                  "dispute_type": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created dispute" } }
+      }
+    },
+    "/api/disputes/{id}/generate-letter": {
+      "post": {
+        "tags": ["Disputes"],
+        "summary": "AI-generate dispute letter",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Generated letter content, ready for Click2Mail submission" } }
+      }
+    },
+    "/api/stripe/create-customer": {
+      "post": {
+        "tags": ["Stripe"],
+        "summary": "Create Stripe customer for client",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id"],
+                "properties": { "client_id": { "type": "integer" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ stripe_customer_id, subscription_id }" } }
+      }
+    },
+    "/api/stripe/payment-link": {
+      "post": {
+        "tags": ["Stripe"],
+        "summary": "Generate Stripe checkout link for client",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["client_id","plan"],
+                "properties": {
+                  "client_id": { "type": "integer" },
+                  "plan": { "type": "string", "enum": ["basic","standard","premium","autopilot"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ checkout_url }" } }
+      }
+    },
+    "/api/stripe/webhook": {
+      "post": {
+        "tags": ["Stripe"],
+        "summary": "Stripe webhook handler",
+        "description": "Handles: invoice.payment_succeeded, invoice.payment_failed, customer.subscription.updated/created/deleted, checkout.session.completed",
+        "responses": { "200": { "description": "Webhook processed" } }
+      }
+    },
+    "/api/stripe/billing-portal": {
+      "post": {
+        "tags": ["Stripe"],
+        "summary": "Generate Stripe billing portal link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": { "client_id": { "type": "integer" } } }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ portal_url }" } }
+      }
+    },
+    "/api/affiliates": {
+      "get": { "tags": ["Affiliates"], "summary": "List all affiliates", "responses": { "200": { "description": "Array of affiliate objects with referral counts" } } },
+      "post": {
+        "tags": ["Affiliates"],
+        "summary": "Create affiliate application",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["first_name","last_name","email"],
+                "properties": {
+                  "first_name": { "type": "string" },
+                  "last_name": { "type": "string" },
+                  "email": { "type": "string" },
+                  "phone": { "type": "string" },
+                  "referral_type": { "type": "string" },
+                  "notes": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created affiliate record" } }
+      }
+    },
+    "/affiliate": {
+      "get": {
+        "tags": ["Affiliates"],
+        "summary": "Affiliate partner portal (SSR)",
+        "description": "Frontend dashboard for affiliates: login/register, referral link, commission stats, marketing materials",
+        "responses": { "200": { "description": "HTML affiliate portal page" } }
+      }
+    },
+    "/api/affiliates/portal-login": {
+      "post": {
+        "tags": ["Affiliates"],
+        "summary": "Affiliate portal authentication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email","referral_code"],
+                "properties": {
+                  "email": { "type": "string" },
+                  "referral_code": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "{ success, affiliate, stats: { clicks, leads, active_clients, total_earned }, referrals[] }" },
+          "404": { "description": "Affiliate not found" }
+        }
+      }
+    },
+    "/api/leads": {
+      "get": { "tags": ["Leads"], "summary": "List leads", "responses": { "200": { "description": "Lead pipeline array" } } },
+      "post": {
+        "tags": ["Leads"],
+        "summary": "Create new lead",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["first_name","last_name","email"],
+                "properties": {
+                  "first_name": { "type": "string" },
+                  "last_name": { "type": "string" },
+                  "email": { "type": "string" },
+                  "phone": { "type": "string" },
+                  "credit_score": { "type": "integer" },
+                  "score_goal": { "type": "integer" },
+                  "source": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created lead" } }
+      }
+    },
+    "/api/leads/{id}/convert": {
+      "post": {
+        "tags": ["Leads"],
+        "summary": "Convert lead to client (admin)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Client created from lead, portal token generated" } }
+      }
+    },
+    "/api/compliance/croa-check": {
+      "post": {
+        "tags": ["Compliance"],
+        "summary": "Run CROA compliance check",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": { "client_id": { "type": "integer" }, "action": { "type": "string" } } }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ compliant: boolean, violations: [], warnings: [] }" } }
+      }
+    },
+    "/api/compliance/rules": {
+      "get": { "tags": ["Compliance"], "summary": "List all active compliance rules", "responses": { "200": { "description": "Array of compliance rules with status" } } }
+    },
+    "/api/ai/models": {
+      "get": {
+        "tags": ["AI"],
+        "summary": "Check AI provider status",
+        "responses": {
+          "200": {
+            "description": "{ configured: { openrouter, groq, openai, anthropic } }",
+            "content": {
+              "application/json": {
+                "example": { "configured": { "openrouter": true, "groq": true, "openai": true, "anthropic": false } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/score-simulation": {
+      "post": {
+        "tags": ["AI"],
+        "summary": "AI credit score impact simulation",
+        "requestBody": {
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "client_id": { "type": "integer" } } } } }
+        },
+        "responses": { "200": { "description": "{ simulation: string } — detailed score projection analysis" } }
+      }
+    },
+    "/api/cron/run-pending-analyses": {
+      "post": {
+        "tags": ["Cron"],
+        "summary": "Process queued Hyperion analyses",
+        "description": "Picks up to 3 pending analysis_reports and runs full 12-agent analysis. Idempotent — safe to call repeatedly.",
+        "responses": { "200": { "description": "{ processed: number, results: [] }" } }
+      }
+    },
+    "/api/cron/send-overdue-reminders": {
+      "post": {
+        "tags": ["Cron"],
+        "summary": "Send payment and task reminders",
+        "responses": { "200": { "description": "{ sent: number }" } }
+      }
+    },
+    "/api/cron/check-deadlines": {
+      "post": {
+        "tags": ["Cron"],
+        "summary": "Check dispute round deadlines and flag overdue",
+        "responses": { "200": { "description": "{ flagged: number }" } }
+      }
+    },
+    "/funnel": {
+      "get": {
+        "tags": ["Signup"],
+        "summary": "Sales/landing page (SSR)",
+        "description": "High-conversion landing page with lead capture form. Links to /signup for payment.",
+        "responses": { "200": { "description": "HTML landing page" } }
+      }
+    },
+    "/sop-library": {
+      "get": {
+        "tags": ["SOP"],
+        "summary": "SOP library UI (SSR)",
+        "description": "Full 62-SOP library with search, filtering by category, and live AI execution panel",
+        "responses": { "200": { "description": "HTML SOP library page" } }
+      }
+    },
+    "/terms": {
+      "get": { "tags": ["Signup"], "summary": "Terms of Service page (SSR)", "responses": { "200": { "description": "HTML Terms of Service" } } }
+    },
+    "/privacy": {
+      "get": { "tags": ["Signup"], "summary": "Privacy Policy page (SSR)", "responses": { "200": { "description": "HTML Privacy Policy" } } }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Client": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "first_name": { "type": "string" },
+          "last_name": { "type": "string" },
+          "email": { "type": "string" },
+          "phone": { "type": "string" },
+          "status": { "type": "string", "enum": ["lead","onboarding","active","suspended","cancelled"] },
+          "plan": { "type": "string", "enum": ["basic","standard","premium","autopilot"] },
+          "credit_score_start": { "type": "integer" },
+          "credit_score_current": { "type": "integer" },
+          "credit_score_goal": { "type": "integer" },
+          "stripe_customer_id": { "type": "string" },
+          "croa_disclosure_signed": { "type": "integer" },
+          "croa_disclosure_date": { "type": "string" },
+          "tcpa_consent": { "type": "integer" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Dispute": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "client_id": { "type": "integer" },
+          "bureau": { "type": "string" },
+          "account_name": { "type": "string" },
+          "reason": { "type": "string" },
+          "status": { "type": "string", "enum": ["draft","approved","mailed","delivered","under_investigation","deleted","updated","verified","escalated"] },
+          "tracking_number": { "type": "string" },
+          "sent_date": { "type": "string" },
+          "response_date": { "type": "string" }
+        }
+      },
+      "AnalysisReport": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "client_id": { "type": "integer" },
+          "credit_report_id": { "type": "integer" },
+          "status": { "type": "string", "enum": ["pending","running","complete","failed"] },
+          "overall_health_score": { "type": "integer" },
+          "health_grade": { "type": "string" },
+          "executive_summary": { "type": "string" },
+          "metro2_violations": { "type": "string" },
+          "fcra_violations": { "type": "string" },
+          "debt_analysis": { "type": "string" },
+          "action_plan_90day": { "type": "string" },
+          "duration_ms": { "type": "integer" }
+        }
+      },
+      "Affiliate": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "first_name": { "type": "string" },
+          "last_name": { "type": "string" },
+          "email": { "type": "string" },
+          "referral_code": { "type": "string" },
+          "commission_rate": { "type": "number" },
+          "total_referrals": { "type": "integer" },
+          "total_clicks": { "type": "integer" },
+          "status": { "type": "string", "enum": ["pending","active","suspended"] }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "securitySchemes": {
+      "StaffSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session_token",
+        "description": "HTTPOnly session cookie from POST /api/auth/login. Expires in 8 hours."
+      },
+      "PortalToken": {
+        "type": "apiKey",
+        "in": "path",
+        "name": "token",
+        "description": "UUID portal token from portal_tokens table. 24-hour expiry. Passed in URL path for portal routes."
+      }
+    }
+  }
+}

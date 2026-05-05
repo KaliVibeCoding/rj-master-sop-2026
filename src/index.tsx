@@ -8538,6 +8538,716 @@ async function runSOPExec() {
 </body></html>`)
 })
 
+// ============================================================
+// SELF-SERVICE SIGNUP FLOW — Lead → CROA Sign → Pay → Portal
+// The missing link for fully automated client acquisition
+// ============================================================
+
+// GET /signup — Self-service signup page with CROA disclosure + Stripe
+app.get('/signup', async (c) => {
+  const env = c.env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const ref = c.req.query('ref') || ''
+  const plan = c.req.query('plan') || 'standard'
+
+  const planDetails: Record<string,{name:string;price:number;desc:string}> = {
+    basic: { name: 'Basic', price: 99, desc: '1 bureau · 1 dispute round/month' },
+    standard: { name: 'Standard', price: 179, desc: '3 bureaus · unlimited disputes' },
+    premium: { name: 'Premium', price: 299, desc: 'AI letters · monthly strategy call' },
+    autopilot: { name: 'Autopilot', price: 499, desc: 'Full AI automation · hands-free' }
+  }
+  const selectedPlan = planDetails[plan] || planDetails.standard
+
+  return c.html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Start Your Credit Journey — ${company}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://js.stripe.com/v3/"></script>
+</head><body class="bg-gray-950 text-white min-h-screen font-sans">
+<div class="max-w-2xl mx-auto px-4 py-12">
+
+  <!-- Header -->
+  <div class="text-center mb-8">
+    <h1 class="text-3xl font-black mb-2">${company}</h1>
+    <p class="text-gray-400">Start repairing your credit today — 3-day risk-free guarantee</p>
+  </div>
+
+  <!-- Plan Badge -->
+  <div class="bg-blue-900/40 border border-blue-700/50 rounded-2xl p-4 mb-6 flex items-center justify-between">
+    <div>
+      <span class="text-blue-400 text-sm font-medium">Selected Plan</span>
+      <h2 class="text-xl font-bold">${selectedPlan.name} — $${selectedPlan.price}/month</h2>
+      <p class="text-gray-400 text-sm">${selectedPlan.desc}</p>
+    </div>
+    <div class="text-right">
+      <p class="text-xs text-gray-500">First payment on Day 4</p>
+      <p class="text-xs text-green-400">3-day cancellation guarantee</p>
+    </div>
+  </div>
+
+  <!-- Signup Form -->
+  <form id="signup-form" class="space-y-4">
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">First Name *</label>
+        <input name="first_name" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none" placeholder="Rick">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">Last Name *</label>
+        <input name="last_name" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none" placeholder="Jefferson">
+      </div>
+    </div>
+    <div>
+      <label class="block text-sm text-gray-400 mb-1">Email Address *</label>
+      <input name="email" type="email" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none" placeholder="you@email.com">
+    </div>
+    <div>
+      <label class="block text-sm text-gray-400 mb-1">Phone Number *</label>
+      <input name="phone" type="tel" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none" placeholder="(555) 555-5555">
+    </div>
+    <div>
+      <label class="block text-sm text-gray-400 mb-1">Current Credit Score (estimate)</label>
+      <select name="credit_score" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none">
+        <option value="">Select your score range</option>
+        <option value="300">Below 500</option>
+        <option value="520">500-549</option>
+        <option value="560">550-579</option>
+        <option value="600">580-619</option>
+        <option value="630">620-649</option>
+        <option value="660">650-679</option>
+        <option value="690">680-699</option>
+        <option value="710">700-719</option>
+        <option value="730">720+</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm text-gray-400 mb-1">Credit Score Goal</label>
+      <select name="score_goal" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none">
+        <option value="680">680 — Auto loan approval</option>
+        <option value="700">700 — Good rates</option>
+        <option value="720" selected>720 — Great rates</option>
+        <option value="740">740 — Mortgage prime rate</option>
+        <option value="760">760 — Best rates</option>
+        <option value="800">800+ — Elite credit</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm text-gray-400 mb-1">What's your main goal?</label>
+      <select name="primary_goal" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl focus:border-blue-500 focus:outline-none">
+        <option value="buy a home">Buy a home</option>
+        <option value="buy a car">Buy or lease a car</option>
+        <option value="business funding">Get business funding</option>
+        <option value="lower interest rates">Lower my interest rates</option>
+        <option value="remove negative items">Remove negative items</option>
+        <option value="general improvement">General credit improvement</option>
+      </select>
+    </div>
+
+    <!-- CROA Disclosure Box -->
+    <div class="bg-yellow-900/20 border border-yellow-700/50 rounded-xl p-4">
+      <h3 class="text-yellow-400 font-bold text-sm mb-2">⚖️ REQUIRED FEDERAL DISCLOSURE — Credit Repair Organizations Act</h3>
+      <div class="text-xs text-gray-400 h-40 overflow-y-auto leading-relaxed mb-3 pr-2">
+        <p class="mb-2"><strong class="text-white">You have the right to dispute inaccurate information in your credit report without the help of a credit repair organization.</strong></p>
+        <p class="mb-2">You may contact a consumer reporting agency directly. There is no fee for disputing information on your own. Consumer reporting agencies are required under law to investigate disputes free of charge.</p>
+        <p class="mb-2">The consumer reporting agencies you may contact are: <strong>Equifax</strong> (1-800-685-1111), <strong>TransUnion</strong> (1-800-888-4213), and <strong>Experian</strong> (1-888-397-3742).</p>
+        <p class="mb-2"><strong class="text-white">You have the right to cancel your contract with ${company} within 3 business days (72 hours) of signing for a full refund.</strong> Cancellation must be submitted in writing to support@rjbusinesssolutions.org.</p>
+        <p class="mb-2">${company} cannot guarantee specific credit score improvements. Results vary by individual. We work to remove inaccurate, unverifiable, or unfairly reported items only.</p>
+        <p class="mb-2">We are required by law not to charge you any fees until we have completed the services we have agreed to perform. Your first payment is processed on Day 4 after contract execution, after the 3-day cancellation window has passed.</p>
+        <p>By signing below, you acknowledge receipt of this disclosure, the Credit Repair Organizations Act rights notice, and agree to our Terms of Service and Privacy Policy.</p>
+      </div>
+      <div class="flex items-start gap-3">
+        <input type="checkbox" id="croa_consent" name="croa_consent" required class="mt-1 w-4 h-4 rounded border-gray-600">
+        <label for="croa_consent" class="text-xs text-gray-300">I have read, understand, and acknowledge the above CROA disclosure. I understand my right to cancel within 3 business days for a full refund. <strong class="text-white">*Required</strong></label>
+      </div>
+    </div>
+
+    <!-- TCPA Consent -->
+    <div class="flex items-start gap-3">
+      <input type="checkbox" id="tcpa_consent" name="tcpa_consent" class="mt-1 w-4 h-4 rounded border-gray-600">
+      <label for="tcpa_consent" class="text-xs text-gray-400">I consent to receive automated text messages and calls from ${company} at the phone number provided, including for marketing purposes. Message and data rates may apply. Reply STOP to opt out at any time.</label>
+    </div>
+
+    <!-- Terms -->
+    <div class="flex items-start gap-3">
+      <input type="checkbox" id="terms_consent" name="terms_consent" required class="mt-1 w-4 h-4 rounded border-gray-600">
+      <label for="terms_consent" class="text-xs text-gray-400">I agree to the <a href="/terms" target="_blank" class="text-blue-400 underline">Terms of Service</a> and <a href="/privacy" target="_blank" class="text-blue-400 underline">Privacy Policy</a>. <strong class="text-white">*Required</strong></label>
+    </div>
+
+    <input type="hidden" name="plan" value="${plan}">
+    <input type="hidden" name="ref" value="${ref}">
+
+    <!-- Error display -->
+    <div id="form-error" class="hidden bg-red-900/40 border border-red-700/50 rounded-xl p-3 text-red-300 text-sm"></div>
+
+    <!-- Submit -->
+    <button type="submit" id="submit-btn" class="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl font-bold text-lg transition-all">
+      Start My Credit Repair — $${selectedPlan.price}/month →
+    </button>
+    <p class="text-center text-xs text-gray-500">3-day money-back guarantee · Cancel anytime · Secure checkout via Stripe</p>
+  </form>
+
+  <!-- Plan switcher -->
+  <div class="mt-8 border-t border-gray-800 pt-6">
+    <p class="text-center text-sm text-gray-400 mb-3">Choose a different plan:</p>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+      ${Object.entries(planDetails).map(([k,v]) => `<a href="/signup?plan=${k}${ref?'&ref='+ref:''}" class="px-3 py-2 text-center rounded-xl text-sm border ${plan===k?'border-blue-500 bg-blue-900/40 text-blue-400':'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'}">${v.name}<br><span class="text-xs">$${v.price}/mo</span></a>`).join('')}
+    </div>
+  </div>
+</div>
+
+<script>
+document.getElementById('signup-form').addEventListener('submit', async function(e) {
+  e.preventDefault()
+  const btn = document.getElementById('submit-btn')
+  const errDiv = document.getElementById('form-error')
+  btn.textContent = 'Processing...'
+  btn.disabled = true
+  errDiv.classList.add('hidden')
+
+  const fd = new FormData(this)
+  const data = Object.fromEntries(fd.entries())
+
+  if (!data.croa_consent) {
+    errDiv.textContent = 'You must acknowledge the CROA disclosure to proceed.'
+    errDiv.classList.remove('hidden')
+    btn.textContent = 'Start My Credit Repair — $${selectedPlan.price}/month →'
+    btn.disabled = false
+    return
+  }
+  if (!data.terms_consent) {
+    errDiv.textContent = 'You must agree to the Terms of Service to proceed.'
+    errDiv.classList.remove('hidden')
+    btn.textContent = 'Start My Credit Repair — $${selectedPlan.price}/month →'
+    btn.disabled = false
+    return
+  }
+
+  try {
+    const r = await fetch('/api/signup/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...data, signup_ip: '', user_agent: navigator.userAgent })
+    })
+    const result = await r.json()
+    if (result.success && result.checkout_url) {
+      window.location.href = result.checkout_url
+    } else if (result.success && result.portal_url) {
+      window.location.href = result.portal_url
+    } else {
+      errDiv.textContent = result.error || 'Signup failed. Please try again or contact support.'
+      errDiv.classList.remove('hidden')
+      btn.textContent = 'Start My Credit Repair →'
+      btn.disabled = false
+    }
+  } catch(e) {
+    errDiv.textContent = 'Network error. Please try again.'
+    errDiv.classList.remove('hidden')
+    btn.textContent = 'Start My Credit Repair →'
+    btn.disabled = false
+  }
+})
+</script>
+</body></html>`)
+})
+
+// POST /api/signup/complete — Full automated signup: client + Stripe + portal token
+app.post('/api/signup/complete', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB unavailable' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { first_name, last_name, email, phone, credit_score, score_goal, primary_goal, plan, ref, tcpa_consent, user_agent } = body
+
+  if (!first_name || !last_name || !email) return c.json({ error: 'First name, last name, and email are required' }, 400)
+  if (!body.croa_consent) return c.json({ error: 'CROA disclosure acknowledgment is required' }, 400)
+  if (!body.terms_consent) return c.json({ error: 'Terms of Service agreement is required' }, 400)
+
+  // Check for duplicate email
+  const existing = await DB.prepare(`SELECT id FROM clients WHERE email = ?`).bind(email).first()
+  if (existing) return c.json({ error: 'An account with this email already exists. Contact support@rjbusinesssolutions.org for help.' }, 409)
+
+  const now = new Date().toISOString()
+  const planKey = plan || 'standard'
+
+  // Create client record
+  const ins = await DB.prepare(`INSERT INTO clients (first_name, last_name, email, phone, credit_score_start, credit_score_current, credit_score_goal, status, plan, source, notes, tcpa_consent, tcpa_consent_date, croa_disclosure_signed, croa_disclosure_date, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+    .bind(first_name, last_name, email, phone || null, parseInt(credit_score)||0, parseInt(credit_score)||0, parseInt(score_goal)||720, 'onboarding', planKey, ref ? `referral:${ref}` : 'self-service-signup', primary_goal || null, tcpa_consent ? 1 : 0, tcpa_consent ? now : null, 1, now).run()
+  const clientId = ins.meta?.last_row_id
+
+  // Log CROA disclosure with full audit trail
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('signup','croa_disclosure_signed','client',?,?)`)
+    .bind(clientId, `CROA disclosure signed at signup. Plan: ${planKey}. Goal: ${score_goal}. Primary goal: ${primary_goal}. UA: ${user_agent?.slice(0,100)||'unknown'}`).run()
+
+  // Create Stripe customer if Stripe key available
+  let stripeCustomerId = null
+  let checkoutUrl = null
+  const STRIPE_PLANS: Record<string,string> = {
+    basic: 'price_basic_monthly', standard: 'price_standard_monthly',
+    premium: 'price_premium_monthly', autopilot: 'price_autopilot_monthly'
+  }
+  const PLAN_PRICES: Record<string,number> = { basic:99, standard:179, premium:299, autopilot:499 }
+
+  if (env.STRIPE_SECRET_KEY) {
+    try {
+      // Create Stripe customer
+      const custRes = await fetch('https://api.stripe.com/v1/customers', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ email, name: `${first_name} ${last_name}`, 'metadata[client_id]': String(clientId), 'metadata[plan]': planKey, phone: phone||'' }).toString()
+      })
+      const cust = await custRes.json() as any
+      if (cust.id) {
+        stripeCustomerId = cust.id
+        await DB.prepare(`UPDATE clients SET stripe_customer_id=? WHERE id=?`).bind(stripeCustomerId, clientId).run()
+
+        // Create Stripe Checkout Session for payment setup
+        const baseUrl = `https://${c.req.header('host') || 'rjbusinesssolutions.org'}`
+        const sessionRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            customer: stripeCustomerId,
+            mode: 'setup',
+            'payment_method_types[]': 'card',
+            success_url: `${baseUrl}/signup/success?client_id=${clientId}&session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${baseUrl}/signup?plan=${planKey}`,
+            'metadata[client_id]': String(clientId),
+            'metadata[plan]': planKey,
+          }).toString()
+        })
+        const session = await sessionRes.json() as any
+        if (session.url) checkoutUrl = session.url
+      }
+    } catch (stripeErr: any) {
+      console.error('Stripe setup error:', stripeErr.message)
+    }
+  }
+
+  // Generate portal token regardless of Stripe status
+  const portalToken = crypto.randomUUID()
+  await DB.prepare(`INSERT INTO portal_tokens (client_id, token, expires_at) VALUES (?,?,datetime('now','+7 days'))`).bind(clientId, portalToken).run()
+  const portalUrl = `/portal/${portalToken}`
+
+  // Send welcome SMS if Twilio configured
+  if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && phone) {
+    try {
+      await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${btoa(env.TWILIO_ACCOUNT_SID+':'+env.TWILIO_AUTH_TOKEN)}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: phone, From: env.TWILIO_PHONE_NUMBER || '', Body: `Welcome to ${env.COMPANY_NAME||'RJ Business Solutions'}, ${first_name}! Your account is ready. ${checkoutUrl ? 'Complete payment setup: '+checkoutUrl : 'Access your portal: '+`https://${c.req.header('host')||'rjbusinesssolutions.org'}${portalUrl}`}. Reply STOP to opt out.` }).toString()
+      })
+    } catch (_) {}
+  }
+
+  // Send welcome email if SendGrid configured
+  if (env.SENDGRID_API_KEY && email) {
+    try {
+      await fetch('https://api.sendgrid.com/v3/mail/send', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email, name: `${first_name} ${last_name}` }] }],
+          from: { email: env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' },
+          subject: `Welcome to ${env.COMPANY_NAME||'RJ Business Solutions'} — You're on your way to ${score_goal}!`,
+          content: [{ type: 'text/html', value: `<h1>Welcome, ${first_name}!</h1><p>Your credit repair journey starts now. Here's what happens next:</p><ol><li>Upload your ID and proof of address to verify your identity</li><li>We'll pull your 3-bureau credit report automatically</li><li>Our AI will analyze your report and build your personalized roadmaps</li><li>Dispute letters will be prepared and sent within 5 business days</li></ol>${checkoutUrl ? `<p><a href="${checkoutUrl}" style="background:#2563eb;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Set Up Payment →</a></p>` : ''}<p><a href="https://${c.req.header('host')||'rjbusinesssolutions.org'}${portalUrl}" style="background:#059669;color:white;padding:12px 24px;text-decoration:none;border-radius:8px;display:inline-block">Access Your Portal →</a></p><p style="font-size:12px;color:#666">You have a 3-day right of cancellation for a full refund. Email support@rjbusinesssolutions.org to cancel. RJ Business Solutions | 1342 NM 333, Tijeras, NM 87059 | (866) 752-4618</p>` }]
+        })
+      })
+    } catch (_) {}
+  }
+
+  // Create staff task for new signup
+  await DB.prepare(`INSERT INTO tasks (client_id, title, description, priority, status, due_date) VALUES (?,?,?,?,?,date('now','+1 day'))`)
+    .bind(clientId, `New Signup — ${first_name} ${last_name}`, `Self-service signup. Plan: ${planKey}. Goal: ${primary_goal}. Score: ${credit_score} → ${score_goal}. ${checkoutUrl ? 'Payment link sent.' : 'Manual payment setup needed.'}`, 'high', 'pending').run()
+
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('signup','client_created','client',?,?)`)
+    .bind(clientId, `Self-service signup. Plan: ${planKey}. Stripe: ${stripeCustomerId||'no'}. Ref: ${ref||'none'}`).run()
+
+  return c.json({
+    success: true,
+    client_id: clientId,
+    checkout_url: checkoutUrl,
+    portal_url: `https://${c.req.header('host')||'rjbusinesssolutions.org'}${portalUrl}`,
+    message: checkoutUrl ? 'Account created. Redirecting to payment setup.' : 'Account created. Redirecting to portal.'
+  })
+})
+
+// GET /signup/success — Post-payment success page
+app.get('/signup/success', async (c) => {
+  const env = c.env; const { DB } = env
+  const clientId = parseInt(c.req.query('client_id') || '0')
+  const client = clientId && DB ? await DB.prepare(`SELECT first_name, last_name FROM clients WHERE id=?`).bind(clientId).first() as any : null
+  const token = DB && clientId ? (await DB.prepare(`SELECT token FROM portal_tokens WHERE client_id=? ORDER BY id DESC LIMIT 1`).bind(clientId).first() as any)?.token : null
+  if (DB && clientId) {
+    await DB.prepare(`UPDATE clients SET status='onboarding' WHERE id=?`).bind(clientId).run()
+  }
+  return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-950 text-white min-h-screen flex items-center justify-center">
+<div class="max-w-lg text-center px-6">
+  <div class="text-6xl mb-6">🎉</div>
+  <h1 class="text-3xl font-black mb-3">You're in, ${client?.first_name||''}!</h1>
+  <p class="text-gray-400 mb-6">Your account is set up and your credit repair journey begins now. Your portal link has been sent to your email.</p>
+  <div class="bg-gray-900 rounded-2xl p-6 mb-6 text-left">
+    <h2 class="font-bold mb-3">Your Next Steps:</h2>
+    <div class="space-y-2 text-sm text-gray-300">
+      <div class="flex items-start gap-2"><span class="text-blue-400 mt-0.5">1.</span><span>Upload your government-issued ID and proof of address</span></div>
+      <div class="flex items-start gap-2"><span class="text-blue-400 mt-0.5">2.</span><span>We'll pull your 3-bureau credit report within 24 hours</span></div>
+      <div class="flex items-start gap-2"><span class="text-blue-400 mt-0.5">3.</span><span>Your AI analysis (12 agents, 8 roadmaps) runs automatically</span></div>
+      <div class="flex items-start gap-2"><span class="text-blue-400 mt-0.5">4.</span><span>Dispute letters prepared and mailed within 5 business days</span></div>
+    </div>
+  </div>
+  ${token ? `<a href="/portal/${token}" class="inline-block px-8 py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl font-bold text-lg mb-4">Access Your Portal →</a><br>` : ''}
+  <p class="text-xs text-gray-500">Questions? Email support@rjbusinesssolutions.org or call (866) 752-4618</p>
+</div></body></html>`)
+})
+
+// ============================================================
+// ID VERIFICATION UPLOAD — Client-facing document upload
+// ============================================================
+
+// POST /api/portal/upload-id — Accept ID document upload from client portal
+app.post('/api/portal/upload-id', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB unavailable' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { token, document_type, file_data, file_name, notes } = body
+  if (!token) return c.json({ error: 'Token required' }, 400)
+  if (!document_type) return c.json({ error: 'document_type required' }, 400)
+
+  const pt = await DB.prepare(`SELECT client_id FROM portal_tokens WHERE token=? AND expires_at > datetime('now')`).bind(token).first() as any
+  if (!pt) return c.json({ error: 'Invalid or expired portal token' }, 401)
+  const clientId = pt.client_id
+
+  // Store document record (file_data would go to R2 in production)
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('client','document_uploaded','client',?,?)`)
+    .bind(clientId, `Document type: ${document_type}. File: ${file_name||'unknown'}. Notes: ${notes||'none'}`).run()
+
+  // Create staff task to review
+  await DB.prepare(`INSERT INTO tasks (client_id, title, description, priority, status, due_date) VALUES (?,?,?,?,?,date('now','+1 day'))`)
+    .bind(clientId, `Review Document Upload — ${document_type}`, `Client uploaded: ${document_type}. File: ${file_name||'unknown'}. ${notes?'Notes: '+notes:''}`, 'high', 'pending').run()
+
+  return c.json({ success: true, message: 'Document received. Our team will review within 1 business day and contact you.' })
+})
+
+// GET /api/portal/:token/documents — list documents for portal client
+app.get('/api/portal/:token/documents', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB unavailable' }, 500)
+  const token = c.req.param('token')
+  const pt = await DB.prepare(`SELECT client_id FROM portal_tokens WHERE token=? AND expires_at > datetime('now')`).bind(token).first() as any
+  if (!pt) return c.json({ error: 'Invalid token' }, 401)
+  const docs = await DB.prepare(`SELECT action, details, created_at FROM audit_log WHERE entity_id=? AND action='document_uploaded' ORDER BY created_at DESC`).bind(pt.client_id).all()
+  return c.json({ documents: docs.results })
+})
+
+// ============================================================
+// AFFILIATE FRONTEND PORTAL
+// ============================================================
+
+// GET /affiliate — Affiliate portal page
+app.get('/affiliate', async (c) => {
+  const env = c.env; const { DB } = env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Affiliate Partner Portal — ${company}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head><body class="bg-gray-950 text-white min-h-screen font-sans">
+
+<!-- Login / Registration -->
+<div id="auth-section" class="max-w-md mx-auto px-4 py-16">
+  <div class="text-center mb-8">
+    <h1 class="text-2xl font-black mb-1">${company}</h1>
+    <p class="text-blue-400 font-medium">Affiliate Partner Portal</p>
+    <p class="text-gray-400 text-sm mt-2">Earn 20-30% per referred client</p>
+  </div>
+  <div class="bg-gray-900 rounded-2xl p-6">
+    <div class="flex mb-4 bg-gray-800 rounded-xl p-1">
+      <button onclick="showTab('login')" id="tab-login" class="flex-1 py-2 rounded-lg text-sm font-medium bg-gray-700 text-white">Login</button>
+      <button onclick="showTab('register')" id="tab-register" class="flex-1 py-2 rounded-lg text-sm font-medium text-gray-400">Apply to Join</button>
+    </div>
+
+    <!-- Login Form -->
+    <form id="login-form" onsubmit="affiliateLogin(event)">
+      <div class="space-y-3">
+        <input id="login-email" type="email" placeholder="Email address" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+        <input id="login-code" type="text" placeholder="Affiliate Code (e.g. RICK2026)" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+        <button type="submit" class="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-medium">Access Dashboard</button>
+      </div>
+    </form>
+
+    <!-- Register Form -->
+    <form id="register-form" class="hidden" onsubmit="affiliateApply(event)">
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <input id="reg-first" placeholder="First Name" required class="w-full px-3 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+          <input id="reg-last" placeholder="Last Name" required class="w-full px-3 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+        </div>
+        <input id="reg-email" type="email" placeholder="Email address" required class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+        <input id="reg-phone" placeholder="Phone number" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+        <select id="reg-type" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+          <option value="">How do you plan to refer clients?</option>
+          <option value="real_estate">Real Estate Agent</option>
+          <option value="mortgage">Mortgage Broker</option>
+          <option value="car_dealer">Auto Dealer</option>
+          <option value="financial_coach">Financial Coach/Advisor</option>
+          <option value="social_media">Social Media / Content Creator</option>
+          <option value="insurance">Insurance Agent</option>
+          <option value="other">Other</option>
+        </select>
+        <textarea id="reg-notes" placeholder="Tell us about your audience or how you'll refer clients..." rows="3" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500 resize-none"></textarea>
+        <button type="submit" class="w-full py-3 bg-green-600 hover:bg-green-500 rounded-xl font-medium">Submit Application</button>
+      </div>
+    </form>
+
+    <div id="auth-message" class="hidden mt-3 p-3 rounded-xl text-sm"></div>
+  </div>
+</div>
+
+<!-- Dashboard (shown after login) -->
+<div id="dashboard" class="hidden max-w-5xl mx-auto px-4 py-8">
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-bold" id="dash-name">Affiliate Dashboard</h1>
+      <p class="text-gray-400 text-sm" id="dash-code"></p>
+    </div>
+    <button onclick="logout()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm">Logout</button>
+  </div>
+
+  <!-- Stats Grid -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div class="bg-gray-900 rounded-2xl p-4 text-center">
+      <p class="text-3xl font-black text-blue-400" id="stat-clicks">0</p>
+      <p class="text-gray-400 text-sm">Link Clicks</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl p-4 text-center">
+      <p class="text-3xl font-black text-green-400" id="stat-leads">0</p>
+      <p class="text-gray-400 text-sm">Leads Referred</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl p-4 text-center">
+      <p class="text-3xl font-black text-yellow-400" id="stat-clients">0</p>
+      <p class="text-gray-400 text-sm">Active Clients</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl p-4 text-center">
+      <p class="text-3xl font-black text-purple-400" id="stat-earnings">$0</p>
+      <p class="text-gray-400 text-sm">Total Earned</p>
+    </div>
+  </div>
+
+  <!-- Referral Link -->
+  <div class="bg-blue-900/30 border border-blue-800/50 rounded-2xl p-6 mb-6">
+    <h2 class="font-bold mb-2">Your Referral Link</h2>
+    <div class="flex gap-2">
+      <input id="ref-link" readonly class="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm text-blue-300 focus:outline-none">
+      <button onclick="copyLink()" class="px-4 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Copy</button>
+    </div>
+    <p class="text-xs text-gray-500 mt-2">Share this link. Anyone who signs up through it is credited to you automatically.</p>
+  </div>
+
+  <!-- Commission Structure -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    <div class="bg-gray-900 rounded-2xl p-4">
+      <p class="text-gray-400 text-xs mb-1">Standard Affiliate</p>
+      <p class="text-2xl font-bold text-green-400">20%</p>
+      <p class="text-sm text-gray-300">of client's first month</p>
+      <p class="text-xs text-gray-500 mt-2">1-9 referrals/month</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl p-4 border border-blue-700/50">
+      <p class="text-blue-400 text-xs mb-1">Silver Affiliate</p>
+      <p class="text-2xl font-bold text-blue-400">25%</p>
+      <p class="text-sm text-gray-300">first month + 10% month 2</p>
+      <p class="text-xs text-gray-500 mt-2">10-24 referrals/month</p>
+    </div>
+    <div class="bg-gray-900 rounded-2xl p-4 border border-yellow-700/50">
+      <p class="text-yellow-400 text-xs mb-1">Gold Affiliate</p>
+      <p class="text-2xl font-bold text-yellow-400">30%</p>
+      <p class="text-sm text-gray-300">first month + 15% months 2-3</p>
+      <p class="text-xs text-gray-500 mt-2">25+ referrals/month</p>
+    </div>
+  </div>
+
+  <!-- Recent Referrals -->
+  <div class="bg-gray-900 rounded-2xl p-6 mb-6">
+    <h2 class="font-bold mb-4">Recent Referrals</h2>
+    <div id="referrals-list">
+      <p class="text-gray-500 text-sm">No referrals yet. Share your link to get started!</p>
+    </div>
+  </div>
+
+  <!-- Marketing Materials -->
+  <div class="bg-gray-900 rounded-2xl p-6">
+    <h2 class="font-bold mb-4">Marketing Materials</h2>
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <a href="/funnel" target="_blank" class="px-4 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm text-center text-gray-300">📄 View Sales Page</a>
+      <button onclick="copyScript()" class="px-4 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm text-center text-gray-300">💬 Copy Email Script</button>
+      <button onclick="copySMS()" class="px-4 py-3 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm text-center text-gray-300">📱 Copy SMS Script</button>
+    </div>
+    <div id="script-display" class="hidden mt-4 bg-gray-800 rounded-xl p-4 text-sm text-gray-300"></div>
+  </div>
+</div>
+
+<script>
+let currentAffiliate = null
+
+function showTab(tab) {
+  document.getElementById('login-form').classList.toggle('hidden', tab !== 'login')
+  document.getElementById('register-form').classList.toggle('hidden', tab !== 'register')
+  document.getElementById('tab-login').className = 'flex-1 py-2 rounded-lg text-sm font-medium ' + (tab==='login' ? 'bg-gray-700 text-white' : 'text-gray-400')
+  document.getElementById('tab-register').className = 'flex-1 py-2 rounded-lg text-sm font-medium ' + (tab==='register' ? 'bg-gray-700 text-white' : 'text-gray-400')
+}
+
+async function affiliateLogin(e) {
+  e.preventDefault()
+  const email = document.getElementById('login-email').value
+  const code = document.getElementById('login-code').value
+  const r = await fetch('/api/affiliates/portal-login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, referral_code: code }) })
+  const d = await r.json()
+  if (d.success) {
+    currentAffiliate = d.affiliate
+    showDashboard(d.affiliate, d.stats, d.referrals)
+  } else {
+    const m = document.getElementById('auth-message')
+    m.textContent = d.error || 'Login failed. Check your email and affiliate code.'
+    m.className = 'mt-3 p-3 rounded-xl text-sm bg-red-900/40 text-red-300'
+    m.classList.remove('hidden')
+  }
+}
+
+async function affiliateApply(e) {
+  e.preventDefault()
+  const r = await fetch('/api/affiliates', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ first_name: document.getElementById('reg-first').value, last_name: document.getElementById('reg-last').value, email: document.getElementById('reg-email').value, phone: document.getElementById('reg-phone').value, referral_type: document.getElementById('reg-type').value, notes: document.getElementById('reg-notes').value }) })
+  const d = await r.json()
+  const m = document.getElementById('auth-message')
+  if (d.success || d.id) {
+    m.textContent = '✓ Application submitted! We review all applications within 2 business days and will email your affiliate code.'
+    m.className = 'mt-3 p-3 rounded-xl text-sm bg-green-900/40 text-green-300'
+  } else {
+    m.textContent = d.error || 'Application failed. Please try again.'
+    m.className = 'mt-3 p-3 rounded-xl text-sm bg-red-900/40 text-red-300'
+  }
+  m.classList.remove('hidden')
+}
+
+function showDashboard(aff, stats, referrals) {
+  document.getElementById('auth-section').classList.add('hidden')
+  document.getElementById('dashboard').classList.remove('hidden')
+  document.getElementById('dash-name').textContent = aff.first_name + ' ' + aff.last_name + ' — Affiliate Dashboard'
+  document.getElementById('dash-code').textContent = 'Affiliate Code: ' + (aff.referral_code || aff.id)
+  document.getElementById('stat-clicks').textContent = stats?.clicks || 0
+  document.getElementById('stat-leads').textContent = stats?.leads || 0
+  document.getElementById('stat-clients').textContent = stats?.active_clients || 0
+  document.getElementById('stat-earnings').textContent = '$' + (stats?.total_earned || 0)
+  const refLink = window.location.origin + '/signup?ref=' + (aff.referral_code || aff.id)
+  document.getElementById('ref-link').value = refLink
+  if (referrals && referrals.length > 0) {
+    document.getElementById('referrals-list').innerHTML = referrals.map(r =>
+      '<div class="flex items-center justify-between py-2 border-b border-gray-800"><div><span class="text-sm">' + (r.first_name||'Client') + ' ' + (r.last_name||'') + '</span><span class="text-xs text-gray-500 ml-2">' + (r.created_at||'').slice(0,10) + '</span></div><span class="text-xs px-2 py-1 rounded-full bg-green-900/50 text-green-400">' + (r.status||'lead') + '</span></div>'
+    ).join('')
+  }
+}
+
+function copyLink() {
+  navigator.clipboard.writeText(document.getElementById('ref-link').value)
+  alert('✓ Referral link copied to clipboard!')
+}
+
+function logout() {
+  currentAffiliate = null
+  document.getElementById('auth-section').classList.remove('hidden')
+  document.getElementById('dashboard').classList.add('hidden')
+}
+
+function copyScript() {
+  const d = document.getElementById('script-display')
+  const aff = currentAffiliate
+  const link = document.getElementById('ref-link')?.value || ''
+  d.textContent = 'Subject: I found something that actually fixes credit\\n\\nHey [Name],\\n\\nI wanted to share something I just discovered — RJ Business Solutions uses AI to analyze your credit and send dispute letters automatically. My clients are seeing 50-100 point gains in 60-90 days.\\n\\nThey offer a 3-day money-back guarantee, so there\\'s zero risk.\\n\\nCheck it out here: ' + link + '\\n\\nLet me know if you have questions — happy to explain more.\\n\\n[Your Name]'
+  d.classList.remove('hidden')
+  navigator.clipboard.writeText(d.textContent)
+}
+
+function copySMS() {
+  const d = document.getElementById('script-display')
+  const link = document.getElementById('ref-link')?.value || ''
+  d.textContent = 'Hey [Name]! Wanted to share this — RJ Business Solutions uses AI to fix credit fast. My clients are seeing real results. 3-day money-back guarantee. Check it out: ' + link
+  d.classList.remove('hidden')
+  navigator.clipboard.writeText(d.textContent)
+}
+</script>
+</body></html>`)
+})
+
+// POST /api/affiliates/portal-login — Affiliate portal authentication
+app.post('/api/affiliates/portal-login', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB unavailable' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { email, referral_code } = body
+  if (!email || !referral_code) return c.json({ error: 'Email and referral code required' }, 400)
+
+  const aff = await DB.prepare(`SELECT * FROM affiliates WHERE email=? AND (referral_code=? OR CAST(id AS TEXT)=?)`).bind(email, referral_code, referral_code).first() as any
+  if (!aff) return c.json({ error: 'Affiliate not found. Check your email and code, or apply at /affiliate.' }, 404)
+
+  // Get stats from referrals
+  const stats = await DB.prepare(`SELECT COUNT(*) as leads, SUM(CASE WHEN c.status='active' THEN 1 ELSE 0 END) as active_clients, SUM(ar.commission_amount) as total_earned FROM affiliate_referrals ar LEFT JOIN clients c ON c.id=ar.client_id WHERE ar.affiliate_id=?`).bind(aff.id).first() as any
+  const referrals = await DB.prepare(`SELECT c.first_name, c.last_name, c.status, c.created_at FROM affiliate_referrals ar LEFT JOIN clients c ON c.id=ar.client_id WHERE ar.affiliate_id=? ORDER BY ar.created_at DESC LIMIT 20`).bind(aff.id).all()
+
+  return c.json({
+    success: true,
+    affiliate: aff,
+    stats: { clicks: aff.total_clicks||0, leads: stats?.leads||0, active_clients: stats?.active_clients||0, total_earned: Math.round((stats?.total_earned||0)*100)/100 },
+    referrals: referrals.results
+  })
+})
+
+// GET /terms — Terms of Service page
+app.get('/terms', async (c) => {
+  const env = c.env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><script src="https://cdn.tailwindcss.com"></script><title>Terms of Service — ${company}</title></head>
+<body class="bg-gray-950 text-white min-h-screen"><div class="max-w-3xl mx-auto px-4 py-12">
+<a href="/" class="text-gray-400 hover:text-white text-sm">← Back</a>
+<h1 class="text-3xl font-bold mt-6 mb-8">Terms of Service</h1>
+<div class="prose prose-invert max-w-none space-y-6 text-gray-300 leading-relaxed">
+<p class="text-sm text-gray-500">Effective: January 1, 2026 | Last Updated: May 5, 2026</p>
+<h2 class="text-xl font-bold text-white">1. CROA Disclosure (Required by Federal Law)</h2>
+<div class="bg-yellow-900/20 border border-yellow-700/50 rounded-xl p-4 text-sm">
+<p class="font-bold text-yellow-400 mb-2">You have the right to dispute inaccurate information in your credit report without the help of a credit repair organization.</p>
+<p>Consumer reporting agencies: Equifax (1-800-685-1111) · TransUnion (1-800-888-4213) · Experian (1-888-397-3742)</p>
+<p class="mt-2">You may cancel within <strong>3 business days</strong> for a full refund. No questions asked.</p>
+</div>
+<h2 class="text-xl font-bold text-white">2. Services</h2>
+<p>${company} provides credit report analysis, dispute letter preparation, credit monitoring, and AI-powered credit strategy services. We do NOT guarantee specific score improvements or item deletions.</p>
+<h2 class="text-xl font-bold text-white">3. Pricing</h2>
+<p>Basic $99/mo · Standard $179/mo · Premium $299/mo · Autopilot $499/mo. First payment on Day 4 after contract execution (after 3-day cancellation window).</p>
+<h2 class="text-xl font-bold text-white">4. Refund Policy</h2>
+<p>Full refund within 3 business days. After that, completed months are non-refundable. Billing errors credited within 5 business days.</p>
+<h2 class="text-xl font-bold text-white">5. Contact</h2>
+<p>${company} · 1342 NM 333, Tijeras, NM 87059 · support@rjbusinesssolutions.org · (866) 752-4618</p>
+</div></div></body></html>`)
+})
+
+// GET /privacy — Privacy Policy page
+app.get('/privacy', async (c) => {
+  const env = c.env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><script src="https://cdn.tailwindcss.com"></script><title>Privacy Policy — ${company}</title></head>
+<body class="bg-gray-950 text-white min-h-screen"><div class="max-w-3xl mx-auto px-4 py-12">
+<a href="/" class="text-gray-400 hover:text-white text-sm">← Back</a>
+<h1 class="text-3xl font-bold mt-6 mb-8">Privacy Policy</h1>
+<div class="prose prose-invert max-w-none space-y-6 text-gray-300 leading-relaxed">
+<p class="text-sm text-gray-500">Effective: January 1, 2026 | Last Updated: May 5, 2026</p>
+<h2 class="text-xl font-bold text-white">Information We Collect</h2>
+<p>We collect: identity data (name, DOB, SSN for credit pull), contact data (email, phone, address), credit data (3-bureau report via MyFreeScoreNow), and payment data (processed by Stripe — we never store raw card numbers).</p>
+<h2 class="text-xl font-bold text-white">How We Use It</h2>
+<p>Solely to provide credit repair services, communicate with you, and comply with FCRA/CROA/GLBA requirements. <strong>We do not sell your data.</strong></p>
+<h2 class="text-xl font-bold text-white">Third-Party Processors</h2>
+<p>Stripe (payments) · Twilio (SMS) · SendGrid (email) · Click2Mail (certified mail) · MyFreeScoreNow (credit data) · Cloudflare (infrastructure) · OpenRouter/OpenAI (AI analysis)</p>
+<h2 class="text-xl font-bold text-white">Your Rights</h2>
+<p>California residents: CCPA rights apply (access, delete, opt-out of sale — we don't sell). All clients: FCRA §609 access rights. Email support@rjbusinesssolutions.org to exercise any right.</p>
+<h2 class="text-xl font-bold text-white">Security</h2>
+<p>TLS 1.3 encryption in transit. Cloudflare D1 encrypted at rest. SHA-256 password hashing. Annual security assessments. GLBA Safeguards Rule compliant.</p>
+<h2 class="text-xl font-bold text-white">Contact</h2>
+<p>${company} · 1342 NM 333, Tijeras, NM 87059 · support@rjbusinesssolutions.org · (866) 752-4618</p>
+</div></div></body></html>`)
+})
+
 export default app
-
-
