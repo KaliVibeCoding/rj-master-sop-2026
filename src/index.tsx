@@ -2441,6 +2441,15 @@ app.post('/api/mfsn/fetch-3b', async (c) => {
           await DB.prepare(`INSERT INTO mfsn_tokens (client_id, mfsn_email, mfsn_token, last_pull_date, total_pulls) VALUES (?, ?, ?, datetime('now'), 1) ON CONFLICT(client_id) DO UPDATE SET mfsn_email=excluded.mfsn_email, mfsn_token=excluded.mfsn_token, last_pull_date=datetime('now'), total_pulls=total_pulls+1, updated_at=datetime('now')`)
             .bind(client_id, client_email, client_token).run()
         } catch (_) {}
+
+        // AUTO-TRIGGER: Queue Hyperion full analysis on every MFSN import
+        try {
+          await DB.prepare(`INSERT INTO analysis_reports (client_id, credit_report_id, status, started_at) VALUES (?,?,'pending',datetime('now'))`)
+            .bind(client_id, reportId).run()
+          await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('system','analysis_queued','client',?,'Hyperion full analysis queued after MFSN import')`)
+            .bind(client_id).run()
+        } catch (_) {}
+
       } catch (dbErr: any) {
         console.error('D1 storage error:', dbErr.message)
       }
@@ -7711,6 +7720,822 @@ app.post('/api/cron/check-deadlines', async (c) => {
   const duration = Date.now() - start
   await DB.prepare(`INSERT INTO cron_log (job_name, status, records_processed, duration_ms, details) VALUES (?,?,?,?,?)`).bind('check_deadlines', 'success', notified, duration, `Overdue deadlines notified: ${notified}`).run()
   return c.json({ success: true, overdue_count: (overdue.results as any[]).length, notified, duration_ms: duration })
+})
+
+// ============================================================
+// HYPERION ANALYSIS ENGINE — Full Multi-Roadmap Analysis
+// Auto-triggered on every MFSN report import
+// ============================================================
+
+// Helper: compute utilization from accounts
+async function computeUtilization(DB: any, clientId: number, reportId: number | null): Promise<{ pct: number; totalBalance: number; totalLimit: number }> {
+  const q = reportId
+    ? `SELECT SUM(balance_amount) as bal, SUM(credit_limit_amount) as lim FROM credit_report_accounts WHERE credit_report_id = ? AND account_open = 1`
+    : `SELECT SUM(balance_amount) as bal, SUM(credit_limit_amount) as lim FROM credit_report_accounts WHERE client_id = ? AND account_open = 1`
+  const row = await DB.prepare(q).bind(reportId || clientId).first() as any
+  const bal = row?.bal || 0; const lim = row?.lim || 0
+  return { pct: lim > 0 ? Math.round((bal / lim) * 100) : 0, totalBalance: bal, totalLimit: lim }
+}
+
+// POST /api/reports/analyze/:reportId — Run full Hyperion analysis on a credit report
+app.post('/api/reports/analyze/:reportId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const reportId = parseInt(c.req.param('reportId'))
+  const start = Date.now()
+
+  // Load report + client
+  const rpt = await DB.prepare(`SELECT cr.*, cl.first_name, cl.last_name, cl.email, cl.credit_score_start, cl.credit_score_goal, cl.credit_score_current FROM credit_reports cr JOIN clients cl ON cl.id = cr.client_id WHERE cr.id = ?`).bind(reportId).first() as any
+  if (!rpt) return c.json({ error: 'Report not found' }, 404)
+  const clientId = rpt.client_id
+
+  // Find or create analysis_reports record
+  let ar = await DB.prepare(`SELECT id FROM analysis_reports WHERE credit_report_id = ? ORDER BY id DESC LIMIT 1`).bind(reportId).first() as any
+  if (!ar) {
+    const ins = await DB.prepare(`INSERT INTO analysis_reports (client_id, credit_report_id, status, started_at) VALUES (?,?,'running',datetime('now'))`).bind(clientId, reportId).run()
+    ar = { id: ins.meta?.last_row_id }
+  } else {
+    await DB.prepare(`UPDATE analysis_reports SET status='running', started_at=datetime('now') WHERE id=?`).bind(ar.id).run()
+  }
+  const arId = ar.id
+
+  // Load accounts + inquiries + public records
+  const accounts = await DB.prepare(`SELECT * FROM credit_report_accounts WHERE credit_report_id = ?`).bind(reportId).all()
+  const inquiries = await DB.prepare(`SELECT * FROM credit_report_inquiries WHERE credit_report_id = ?`).bind(reportId).all()
+  const pubRecs = await DB.prepare(`SELECT * FROM credit_report_public_records WHERE credit_report_id = ?`).bind(reportId).all()
+  const accts = accounts.results as any[]
+  const inqs = inquiries.results as any[]
+  const prs = pubRecs.results as any[]
+
+  const scoreAvg = Math.round([(rpt.score_efx||0),(rpt.score_tu||0),(rpt.score_exp||0)].filter(s=>s>0).reduce((a:number,b:number)=>a+b,0) / [(rpt.score_efx||0),(rpt.score_tu||0),(rpt.score_exp||0)].filter(s=>s>0).length || 0)
+  const { pct: utilPct, totalBalance, totalLimit } = await computeUtilization(DB, clientId, reportId)
+
+  const negAccts = accts.filter(a => a.payment_status === 'C' || a.past_due_amount > 0 || a.times_90_days_late > 0 || (a.account_status||'').toLowerCase().includes('charge'))
+  const hardInqs = inqs.filter(i => i.inquiry_type !== 'soft')
+
+  // Build data context for all AI agents
+  const clientCtx = `Client: ${rpt.first_name} ${rpt.last_name} | Scores: EFX=${rpt.score_efx||'?'} TU=${rpt.score_tu||'?'} EXP=${rpt.score_exp||'?'} | Avg: ${scoreAvg} | Goal: ${rpt.credit_score_goal||'not set'} | Start Score: ${rpt.credit_score_start||'unknown'}`
+  const reportCtx = `Total Accounts: ${rpt.total_accounts||0} | Open: ${rpt.total_open_accounts||0} | Negative: ${rpt.total_negative_accounts||0} | Inquiries: ${rpt.total_inquiries||0} | Collections: ${rpt.total_collections||0} | Public Records: ${prs.length} | Credit History: ${rpt.credit_history_months||0} months | Utilization: ${utilPct}% (Balance: $${Math.round(totalBalance).toLocaleString()} / Limit: $${Math.round(totalLimit).toLocaleString()})`
+  const acctSummary = accts.slice(0,20).map(a => `${a.account_name||a.provider||'Account'}: ${a.account_type} | Status: ${a.account_status} | Balance: $${a.balance_amount||0} | Limit: $${a.credit_limit_amount||0} | Late30/60/90: ${a.times_30_days_late||0}/${a.times_60_days_late||0}/${a.times_90_days_late||0} | Payment: ${a.payment_status||'OK'}`).join('\n')
+  const negSummary = negAccts.map(a => `NEGATIVE — ${a.account_name||'Account'}: ${a.account_type} | Balance: $${a.balance_amount||0} | Past Due: $${a.past_due_amount||0} | Status: ${a.account_status}`).join('\n')
+  const inqSummary = hardInqs.slice(0,10).map(i => `Hard Inquiry: ${i.inquirer_name} on ${i.inquiry_date}`).join('\n')
+
+  // Run 8 core analysis agents in parallel using Promise.allSettled for resilience
+  const [execSum, scoreProj, metro2, fcraAudit, debtPlan, autoLoan, mortgage, bizFund, debtRemoval, actionPlan, productMatch, behaviorProfile] = await Promise.allSettled([
+
+    // 1. Executive Summary Agent
+    callAISimple(env,
+      `You are HYPERION Executive Summary Agent for RJ Business Solutions. You generate concise, high-impact executive summaries of credit analyses for ${rpt.first_name} ${rpt.last_name}. Format with: Overall Credit Health Score (0-100), letter grade, top 5 findings ranked by impact, 3 immediate actions with expected point gains, 90-day projected score range (conservative/moderate/aggressive), and estimated annual interest savings. Use FCRA/Metro2 terminology. Be specific and actionable.`,
+      `${clientCtx}\n${reportCtx}\n\nNegative Items:\n${negSummary||'None'}\n\nHard Inquiries:\n${inqSummary||'None'}\n\nProvide complete executive summary.`),
+
+    // 2. Score Projection Agent
+    callAISimple(env,
+      `You are HYPERION Score Projection Agent. Model credit score trajectories for 3, 6, 12, and 24 months using three scenarios (Conservative: minimum compliance actions only / Moderate: standard dispute + utilization work / Aggressive: all disputes + AU tradelines + rapid rescore). For each scenario provide: projected score, key milestones, and probability %. Format as structured analysis with specific month-by-month projections.`,
+      `${clientCtx}\n${reportCtx}\n\nNegative Items (${negAccts.length}):\n${negSummary||'None'}\nProvide complete score trajectory analysis.`),
+
+    // 3. Metro 2 Compliance Audit Agent
+    callAISimple(env,
+      `You are HYPERION Metro 2® Compliance Audit Agent for RJ Business Solutions. Audit each account against Metro 2® Format Specification. Check: Account Status codes, Payment Rating fields, Compliance Condition codes, Special Comment codes, Date fields (DOFD, DOLA, Date Closed accuracy), Balance consistency, Payment History Profile accuracy. Rate severity: Critical/Major/Minor. For each violation provide the exact Metro 2 field, the violation, and the legal remedy under FCRA §611/§623.`,
+      `${clientCtx}\n\nAll Accounts:\n${acctSummary||'None'}\n\nProvide complete Metro 2 violation audit.`),
+
+    // 4. FCRA/FDCPA Legal Audit Agent
+    callAISimple(env,
+      `You are HYPERION Legal Compliance Agent. Audit all accounts under: FCRA §611(a) dispute rights, §607(b) accuracy requirements, §623(a) furnisher duties, §605(a) 7-year reporting limit, §605(c) Running of Reporting Period. Also audit collection accounts under FDCPA §809(b) validation, §807 misrepresentation. For each violation: cite the exact statute, describe the violation, calculate statute of limitations, recommend dispute letter type, and estimate deletion probability (%).`,
+      `${clientCtx}\n\nAccounts:\n${acctSummary||'None'}\nNegative:\n${negSummary||'None'}\nPublic Records: ${prs.length}\n\nProvide complete FCRA/FDCPA legal audit.`),
+
+    // 5. Debt Analysis Agent
+    callAISimple(env,
+      `You are HYPERION Debt Analysis Agent. Analyze all debt accounts and produce: Total debt by category (revolving/installment/collection), Debt-to-Income analysis (assume income unknown — note this), Avalanche vs Snowball payoff comparison with monthly timelines, Credit utilization optimization plan (which accounts to pay down first for maximum score impact), Charge-off and collection negotiation strategy (settlement percentages, PFD possibilities). Include specific dollar amounts and timelines.`,
+      `${clientCtx}\n${reportCtx}\n\nAll Accounts:\n${acctSummary||'None'}\n\nProvide complete debt analysis and payoff strategy.`),
+
+    // 6. Auto Loan Roadmap Agent
+    callAISimple(env,
+      `You are HYPERION Auto Loan Roadmap Agent for RJ Business Solutions. Create a complete auto loan qualification roadmap for ${rpt.first_name} ${rpt.last_name}. Include: Current approval probability and rate tier, What score is needed for prime rate (<6%), Specific steps to qualify for best rate (score target, utilization target, inquiry strategy), Timeline: months to qualify at current rate vs. if they follow the roadmap, Rate comparison: current estimated rate vs. target rate, Monthly payment comparison on a $30,000 vehicle (current vs target), Lifetime savings, Top 3 credit unions/lenders that work with their current score tier, Recommended auto loan strategy (subprime bridge vs wait). Be specific with dollar amounts.`,
+      `${clientCtx}\n${reportCtx}\n\nGenerate complete auto loan qualification roadmap.`),
+
+    // 7. Mortgage Roadmap Agent
+    callAISimple(env,
+      `You are HYPERION Mortgage Qualification Roadmap Agent for RJ Business Solutions. Create a complete mortgage readiness roadmap for ${rpt.first_name} ${rpt.last_name}. Include: Current mortgage qualification status (FHA at 580+, Conventional at 620+, FHA at 580 with 3.5% down), Target score for best rate (740+), Gap analysis: what needs to change and by when, 30-year mortgage rate comparison: current score vs. 740+ score, On a $300,000 home: current monthly payment vs target monthly payment vs lifetime interest savings, Specific dispute/action items that will move the needle toward mortgage qualification, Timeline: months to FHA qualification vs conventional qualification, Required debt-to-income improvements, Downpayment savings strategy. Use current 2026 rate assumptions.`,
+      `${clientCtx}\n${reportCtx}\n\nNegative Items:\n${negSummary||'None'}\nGenerate complete mortgage qualification roadmap.`),
+
+    // 8. Business Funding Roadmap Agent
+    callAISimple(env,
+      `You are HYPERION Business Funding Roadmap Agent for RJ Business Solutions. Create a complete business funding roadmap for ${rpt.first_name} ${rpt.last_name}. Include: Personal credit impact on business funding (personal guarantee thresholds), Fundability score (1-100) based on personal credit profile, Business credit building path: Tier 1 (starter Net-30s: Uline, Grainger, Quill), Tier 2 (fleet/gas cards), Tier 3 (business credit cards), Tier 4 (no-PG funding), Timeline from current state to $50K-$500K unsecured business credit, EIN-only credit building strategy, Key business credit bureaus (D&B PAYDEX, Experian Business, Equifax Business), SBA loan qualification analysis (7a, Microloan), Revenue-based financing alternatives, Required separation steps (business bank account, virtual office, DUNS number). Be specific with dollar amounts and timelines.`,
+      `${clientCtx}\n${reportCtx}\n\nGenerate complete business funding roadmap.`),
+
+    // 9. Debt Removal Roadmap Agent
+    callAISimple(env,
+      `You are HYPERION Debt Removal & Collection Deletion Agent for RJ Business Solutions. Create a complete debt removal roadmap for ${rpt.first_name} ${rpt.last_name}. Include: Priority order for dispute/deletion attempts ranked by (1) deletion probability, (2) score impact, (3) ease, Collection account analysis: which to dispute, which to settle PFD (Pay For Delete), which to validate, Specific dispute strategies per negative item: factual inaccuracy, Metro 2 violation, DOFD manipulation, obsolete debt (7-year rule), FDCPA violations, Charge-off negotiation: target settlement percentages by debt age, Goodwill deletion request targets: which creditors respond to goodwill letters, Rapid rescore opportunities after deletions, Expected point gain per deletion, Total expected point gain if all negatives removed. Include certified mail strategy.`,
+      `${clientCtx}\n${reportCtx}\n\nNegative Items (${negAccts.length}):\n${negSummary||'None'}\n\nInquiries:\n${inqSummary||'None'}\n\nGenerate complete debt removal roadmap.`),
+
+    // 10. 90-Day Action Plan Agent
+    callAISimple(env,
+      `You are HYPERION 90-Day Credit Transformation Plan Agent for RJ Business Solutions. Create a detailed, executable 90-day credit transformation plan for ${rpt.first_name} ${rpt.last_name}. Structure as three phases:\n\nPHASE 1 (Days 1-30) — Foundation & Dispute Launch:\n- Specific accounts to dispute at each bureau\n- Exact dispute reasons (factual error, Metro 2 violation, unverifiable, obsolete)\n- Utilization reduction targets (which cards to pay)\n- Inquiry challenge strategy if applicable\n- Expected score movement: +X to +Y points\n\nPHASE 2 (Days 31-60) — Enforcement & Optimization:\n- Follow-up on Phase 1 disputes\n- Escalation letters (Method of Verification, CFPB complaints)\n- Authorized user tradeline strategy\n- Additional utilization optimization\n- Expected cumulative score movement\n\nPHASE 3 (Days 61-90) — Acceleration & Product Acquisition:\n- Remaining dispute follow-ups\n- Positive account building (credit builder loan, secured card)\n- Score milestone targets\n- Product applications when score hits targets\n- Expected final score at day 90\n\nInclude specific days for key actions and estimated point impacts.`,
+      `${clientCtx}\n${reportCtx}\n\nNegative Items:\n${negSummary||'None'}\nInquiries:\n${inqSummary||'None'}\n\nGenerate complete 90-day action plan.`),
+
+    // 11. Product Matching Agent
+    callAISimple(env,
+      `You are HYPERION Financial Product Matching Agent. Match ${rpt.first_name} ${rpt.last_name} to optimal financial products based on their current credit profile. Provide: Credit Cards — secured cards available now, approval probability for 3 specific cards at current score, target cards when score reaches 680/720/750. Personal Loans — credit builder loan recommendations, debt consolidation eligibility at current vs target score. Auto Loans — current rate tier, target rate tier. Mortgage — current status, timeline. Business Credit — immediate business credit options. For each product: specific lender names, estimated APR, approval probability (%), and the score needed for next tier. Format as actionable recommendations.`,
+      `${clientCtx}\n${reportCtx}\n\nGenerate complete product match analysis.`),
+
+    // 12. Behavioral Profile Agent
+    callAISimple(env,
+      `You are HYPERION Behavioral Psychology Agent. Analyze the credit profile pattern and create a financial behavior profile for ${rpt.first_name} ${rpt.last_name}. Based on: payment history patterns, account types opened, inquiry patterns, balance-to-limit behavior. Identify: Financial personality type (Avoider/Impulsive/Planner/Reactor), Key behavioral risk factors visible in the data, Personalized motivation strategy (goal-anchoring, milestone rewards, accountability structure), Top 3 behavioral changes with highest credit impact, Habit formation plan for sustained credit improvement. Keep practical and encouraging.`,
+      `${clientCtx}\n${reportCtx}\n\nAccount patterns:\n${acctSummary?.slice(0,500)||'None'}\n\nGenerate behavioral profile and strategy.`)
+  ])
+
+  // Extract text results (handle settled promises)
+  const getText = (r: PromiseSettledResult<any>) => r.status === 'fulfilled' ? (r.value || '') : `Analysis unavailable: ${(r as any).reason?.message || 'AI error'}`
+
+  const execSumText = getText(execSum)
+  const scoreProjText = getText(scoreProj)
+  const metro2Text = getText(metro2)
+  const fcraText = getText(fcraAudit)
+  const debtText = getText(debtPlan)
+  const autoLoanText = getText(autoLoan)
+  const mortgageText = getText(mortgage)
+  const bizFundText = getText(bizFund)
+  const debtRemovalText = getText(debtRemoval)
+  const actionPlanText = getText(actionPlan)
+  const productMatchText = getText(productMatch)
+  const behaviorText = getText(behaviorProfile)
+
+  // Compute health score heuristically
+  let health = 50
+  if (scoreAvg >= 750) health += 30; else if (scoreAvg >= 700) health += 20; else if (scoreAvg >= 650) health += 10; else if (scoreAvg >= 600) health += 0; else health -= 10
+  if (utilPct < 10) health += 15; else if (utilPct < 30) health += 8; else if (utilPct > 50) health -= 15; else if (utilPct > 80) health -= 25
+  if (negAccts.length === 0) health += 10; else health -= Math.min(25, negAccts.length * 4)
+  if (hardInqs.length > 6) health -= 10; else if (hardInqs.length > 3) health -= 5
+  if (prs.length > 0) health -= 15
+  health = Math.max(0, Math.min(100, health))
+  const grade = health >= 90 ? 'A' : health >= 80 ? 'B' : health >= 70 ? 'C' : health >= 60 ? 'D' : 'F'
+
+  const duration = Date.now() - start
+
+  // Save full analysis to analysis_reports
+  await DB.prepare(`UPDATE analysis_reports SET status='completed', overall_health_score=?, health_grade=?, utilization_pct=?, executive_summary=?, score_analysis=?, metro2_violations=?, fcra_violations=?, debt_analysis=?, action_plan_90day=?, behavior_profile=?, completed_at=datetime('now'), duration_ms=?, updated_at=datetime('now') WHERE id=?`)
+    .bind(health, grade, utilPct, execSumText, scoreProjText, metro2Text, fcraText, debtText, actionPlanText, behaviorText, duration, arId).run()
+
+  // Save roadmaps to roadmap_results table
+  const roadmaps: Array<{ type: string; title: string; content: string }> = [
+    { type: 'auto_loan', title: 'Auto Loan Qualification Roadmap', content: autoLoanText },
+    { type: 'mortgage', title: 'Mortgage Qualification Roadmap', content: mortgageText },
+    { type: 'business_funding', title: 'Business Funding Roadmap', content: bizFundText },
+    { type: 'debt_removal', title: 'Debt Removal & Collection Deletion Roadmap', content: debtRemovalText },
+    { type: '90_day_plan', title: '90-Day Credit Transformation Plan', content: actionPlanText },
+    { type: 'product_match', title: 'Financial Product Matches', content: productMatchText },
+    { type: 'score_optimization', title: 'Score Projection & Optimization', content: scoreProjText },
+    { type: 'executive_summary', title: 'Executive Summary', content: execSumText }
+  ]
+  for (const rm of roadmaps) {
+    await DB.prepare(`INSERT INTO roadmap_results (client_id, credit_report_id, analysis_report_id, roadmap_type, title, content, status) VALUES (?,?,?,?,?,?,'completed')`)
+      .bind(clientId, reportId, arId, rm.type, rm.title, rm.content).run()
+  }
+
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('hyperion','analysis_completed','client',?,?)`)
+    .bind(clientId, `Full analysis: score=${scoreAvg}, health=${health}${grade}, negatives=${negAccts.length}, roadmaps=8, duration=${Math.round(duration/1000)}s`).run()
+
+  return c.json({
+    success: true,
+    analysis_id: arId,
+    health_score: health,
+    health_grade: grade,
+    score_avg: scoreAvg,
+    utilization_pct: utilPct,
+    negative_items: negAccts.length,
+    roadmaps_generated: roadmaps.length,
+    duration_ms: duration,
+    roadmaps: roadmaps.map(r => ({ type: r.type, title: r.title, preview: r.content.slice(0, 200) + '...' }))
+  })
+})
+
+// GET /api/reports/analysis/:clientId — get latest analysis for client
+app.get('/api/reports/analysis/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const analysis = await DB.prepare(`SELECT * FROM analysis_reports WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(clientId).first()
+  if (!analysis) return c.json({ error: 'No analysis found for this client' }, 404)
+  const roadmaps = await DB.prepare(`SELECT roadmap_type, title, content, generated_at FROM roadmap_results WHERE client_id = ? AND analysis_report_id = ? ORDER BY id ASC`).bind(clientId, (analysis as any).id).all()
+  return c.json({ analysis, roadmaps: roadmaps.results })
+})
+
+// GET /api/roadmaps/:clientId/:type — get specific roadmap
+app.get('/api/roadmaps/:clientId/:type', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const type = c.req.param('type')
+  const roadmap = await DB.prepare(`SELECT * FROM roadmap_results WHERE client_id = ? AND roadmap_type = ? ORDER BY id DESC LIMIT 1`).bind(clientId, type).first()
+  if (!roadmap) return c.json({ error: 'Roadmap not found. Run analysis first.' }, 404)
+  return c.json({ roadmap })
+})
+
+// GET /api/reports/pending — list all pending analyses (for cron)
+app.get('/api/reports/pending', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const pending = await DB.prepare(`SELECT ar.*, cl.first_name, cl.last_name FROM analysis_reports ar JOIN clients cl ON cl.id = ar.client_id WHERE ar.status = 'pending' ORDER BY ar.created_at ASC LIMIT 20`).all()
+  return c.json({ pending: pending.results, count: (pending.results as any[]).length })
+})
+
+// POST /api/cron/run-pending-analyses — process queued analyses
+app.post('/api/cron/run-pending-analyses', async (c) => {
+  const env = c.env; const { DB } = env
+  const cronSecret = env.CRON_SECRET
+  if (cronSecret && c.req.header('x-cron-secret') !== cronSecret) return c.json({ error: 'Unauthorized' }, 401)
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const pending = await DB.prepare(`SELECT * FROM analysis_reports WHERE status = 'pending' ORDER BY created_at ASC LIMIT 3`).all()
+  const results: any[] = []
+  for (const ar of pending.results as any[]) {
+    try {
+      const r = await fetch(`${c.req.url.replace('/api/cron/run-pending-analyses',`/api/reports/analyze/${ar.credit_report_id || 0}`)}`, { method: 'POST' })
+      results.push({ id: ar.id, status: r.ok ? 'triggered' : 'failed' })
+    } catch (e: any) {
+      results.push({ id: ar.id, status: 'error', error: e.message })
+    }
+  }
+  return c.json({ processed: results.length, results })
+})
+
+// ============================================================
+// ADDITIONAL AI AGENTS (Metro 2, FCRA, Inquiry, Score Sim)
+// ============================================================
+
+// POST /api/ai/metro2-audit — Metro 2 Compliance Audit Agent
+app.post('/api/ai/metro2-audit', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, report_id } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const accounts = await DB.prepare(`SELECT * FROM credit_report_accounts WHERE ${report_id ? 'credit_report_id = ?' : 'client_id = ?'} LIMIT 30`).bind(report_id || client_id).all()
+  const acctList = (accounts.results as any[]).map(a => `${a.account_name||'Account'} (${a.provider}): Status=${a.account_status} Balance=$${a.balance_amount||0} Late30/60/90=${a.times_30_days_late||0}/${a.times_60_days_late||0}/${a.times_90_days_late||0} Opened=${a.date_opened||'?'} Closed=${a.date_closed||'N/A'} Payment=${a.payment_status||'?'}`).join('\n')
+  const audit = await callAISimple(env,
+    `You are HYPERION Metro 2 Compliance Audit Agent. You are an expert in the Metro 2® Credit Reporting Resource Guide (CRRG). Audit each account against Metro 2 specifications. For each violation: name the account, cite the Metro 2 field name, describe the violation, rate severity (Critical/Major/Minor), and provide the exact FCRA statute for dispute. Critical violations are grounds for immediate deletion demand. Output as a structured audit report.`,
+    `Accounts to audit:\n${acctList||'No accounts found'}`)
+  await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('metro2_agent','metro2_audit_run','client',?,?)`).bind(client_id, `Audited ${(accounts.results as any[]).length} accounts`).run()
+  return c.json({ success: true, agent: 'metro2_audit', audit, accounts_audited: (accounts.results as any[]).length })
+})
+
+// POST /api/ai/fcra-audit — FCRA Legal Audit Agent
+app.post('/api/ai/fcra-audit', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, report_id } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const [client, accounts, pubRecs] = await Promise.all([
+    DB.prepare(`SELECT first_name, last_name, credit_score_current FROM clients WHERE id = ?`).bind(client_id).first(),
+    DB.prepare(`SELECT * FROM credit_report_accounts WHERE ${report_id ? 'credit_report_id = ?' : 'client_id = ?'} LIMIT 30`).bind(report_id || client_id).all(),
+    DB.prepare(`SELECT * FROM credit_report_public_records WHERE ${report_id ? 'credit_report_id = ?' : 'client_id = ?'} LIMIT 10`).bind(report_id || client_id).all()
+  ])
+  const cl = client as any
+  const acctList = (accounts.results as any[]).map(a => `${a.account_name||'Account'}: opened=${a.date_opened||'?'} status=${a.account_status} late=${a.times_90_days_late>0?'YES':'no'}`).join('\n')
+  const audit = await callAISimple(env,
+    `You are HYPERION FCRA Legal Audit Agent and credit law expert. Audit accounts under: FCRA §611(a) dispute rights, §607(b) accuracy requirements, §623(a) furnisher duties, §605(a) 7-year reporting limit, §605(c) Running of Reporting Period (DOFD rules), §605B identity theft provisions. Also check FDCPA §809(b) validation rights and §807 misrepresentation for any collection accounts. For each violation: cite exact statute and subsection, describe violation in plain language, calculate if still within reporting window, assign dispute strategy (Bureau dispute / Furnisher dispute / CFPB complaint / Demand letter), estimate deletion probability as percentage.`,
+    `Client: ${cl?.first_name} ${cl?.last_name}\nAccounts:\n${acctList}\nPublic Records: ${(pubRecs.results as any[]).length}`)
+  return c.json({ success: true, agent: 'fcra_audit', audit })
+})
+
+// POST /api/ai/inquiry-removal — Hard Inquiry Challenge Agent
+app.post('/api/ai/inquiry-removal', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, report_id } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const inquiries = await DB.prepare(`SELECT * FROM credit_report_inquiries WHERE ${report_id ? 'credit_report_id = ?' : 'client_id = ?'} AND inquiry_type != 'soft' ORDER BY inquiry_date DESC LIMIT 20`).bind(report_id || client_id).all()
+  const inqList = (inquiries.results as any[]).map(i => `${i.inquirer_name} | Date: ${i.inquiry_date} | Purpose: ${i.inquiry_purpose||'?'} | Bureau: ${i.provider}`).join('\n')
+  const strategy = await callAISimple(env,
+    `You are HYPERION Inquiry Removal Agent. Analyze hard inquiries and create a removal strategy. For each inquiry: check if older than 2 years (automatic removal eligible), check if client authorized it (unauthorized = immediate deletion grounds under FCRA §604), assess dispute probability, recommend: (a) dispute as unauthorized, (b) goodwill removal request, (c) wait for natural expiration. Calculate total point impact of removing all hard inquiries. Provide bureau-specific inquiry dispute letter templates. Note: inquiries fall off after 24 months automatically.`,
+    `Hard Inquiries (${(inquiries.results as any[]).length}):\n${inqList||'No hard inquiries found'}\n\nGenerate complete inquiry removal strategy.`)
+  return c.json({ success: true, agent: 'inquiry_removal', strategy, hard_inquiries: (inquiries.results as any[]).length })
+})
+
+// POST /api/ai/score-simulation — Score Simulation Agent
+app.post('/api/ai/score-simulation', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, report_id, scenarios } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const [client, accounts] = await Promise.all([
+    DB.prepare(`SELECT first_name, last_name, credit_score_current, credit_score_goal FROM clients WHERE id = ?`).bind(client_id).first(),
+    DB.prepare(`SELECT * FROM credit_report_accounts WHERE ${report_id ? 'credit_report_id = ?' : 'client_id = ?'} LIMIT 25`).bind(report_id || client_id).all()
+  ])
+  const cl = client as any
+  const acctList = (accounts.results as any[]).map(a => `${a.account_name}: balance=$${a.balance_amount||0} limit=$${a.credit_limit_amount||0} status=${a.account_status} late90=${a.times_90_days_late||0}`).join('\n')
+  const simulation = await callAISimple(env,
+    `You are HYPERION Score Simulation Agent. Run "What-If" credit score simulations. For each scenario provided, model the precise point impact on FICO 8/9 and VantageScore 4.0. Use FICO factor weights: Payment History 35%, Utilization 30%, Age of Credit 15%, Account Mix 10%, New Credit 10%. Show: current baseline, change per scenario, new projected score, and compound impact when combined. Include: timeline for change to appear on report, and which bureau would show the change first.`,
+    `Client: ${cl?.first_name} ${cl?.last_name} | Current Score: ${cl?.credit_score_current||'unknown'} | Goal: ${cl?.credit_score_goal||'not set'}\n\nAccounts:\n${acctList}\n\nScenarios to model:\n${scenarios || '1. Pay all cards to <10% utilization\n2. Remove largest collection\n3. Remove all collections\n4. Add authorized user tradeline (10yr, $10K limit)\n5. Remove all hard inquiries\n6. All of the above combined'}`)
+  return c.json({ success: true, agent: 'score_simulation', simulation })
+})
+
+// POST /api/ai/settlement-strategy — Settlement Negotiation Agent
+app.post('/api/ai/settlement-strategy', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, creditor, balance, account_type, age_months, context } = body
+  if (!client_id) return c.json({ error: 'client_id required' }, 400)
+  const strategy = await callAISimple(env,
+    `You are HYPERION Settlement Negotiation Agent for RJ Business Solutions. Create a complete settlement and Pay-For-Delete (PFD) strategy. Include: Target settlement percentage based on account age and type (typical ranges: <1yr=80-90%, 1-3yr=50-70%, 3-5yr=30-50%, 5yr+=25-40%), PFD letter script and negotiation talking points, Cease and desist trigger conditions, 3-step negotiation ladder (opening offer → counter → final), Lump sum vs payment plan comparison, Tax implications of settled debt (1099-C), Alternative: Goodwill deletion after payment, FDCPA protections to assert during negotiation. Provide actual dollar amounts for a ${balance ? '$'+balance : 'unknown balance'} account.`,
+    `Creditor: ${creditor||'Unknown'} | Balance: $${balance||0} | Type: ${account_type||'collection'} | Age: ${age_months||'unknown'} months | Context: ${context||'none'}`)
+  return c.json({ success: true, agent: 'settlement_strategy', strategy })
+})
+
+// POST /api/ai/goodwill-letter — Goodwill Letter Generator
+app.post('/api/ai/goodwill-letter', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, creditor, account_type, hardship_reason, current_status } = body
+  if (!client_id || !creditor) return c.json({ error: 'client_id and creditor required' }, 400)
+  const client = await DB.prepare(`SELECT first_name, last_name FROM clients WHERE id = ?`).bind(client_id).first() as any
+  const letter = await callAISimple(env,
+    `You are HYPERION Goodwill Letter Agent. Generate a compelling, human, emotionally resonant goodwill deletion request letter for ${client?.first_name} ${client?.last_name}. The letter should: acknowledge the late payment, explain the hardship without making excuses, highlight their long/positive relationship with the creditor, emphasize they've been current since the incident, appeal to the creditor's goodwill and discretion, specifically request removal of the late payment notation, cite that the account is now current/paid and the mark no longer reflects their true creditworthiness. Keep it 3 paragraphs, genuine, professional but human. Do NOT cite laws — this is a goodwill appeal, not a legal dispute.`,
+    `Creditor: ${creditor} | Account type: ${account_type||'credit card'} | Hardship reason: ${hardship_reason||'financial hardship'} | Current status: ${current_status||'account now current'}`)
+  return c.json({ success: true, agent: 'goodwill_letter', letter })
+})
+
+// POST /api/ai/cfpb-complaint — CFPB Complaint Draft Agent
+app.post('/api/ai/cfpb-complaint', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, company, issue, dispute_history, violation_type } = body
+  if (!client_id || !company || !issue) return c.json({ error: 'client_id, company, issue required' }, 400)
+  const client = await DB.prepare(`SELECT first_name, last_name FROM clients WHERE id = ?`).bind(client_id).first() as any
+  const complaint = await callAISimple(env,
+    `You are HYPERION CFPB Complaint Draft Agent. Draft a complete CFPB complaint for submission at consumerfinance.gov/complaint. The complaint must: clearly identify the company and product type, describe the timeline of events in chronological order, cite specific FCRA/FDCPA violations with exact statute references, state what resolution was attempted and failed, specify the desired resolution, be factual and evidence-based (no emotional language — CFPB responds to specifics). Also provide: the exact CFPB complaint category to select, estimated CFPB response timeline, and next steps if CFPB does not resolve.`,
+    `Client: ${client?.first_name} ${client?.last_name} | Company: ${company} | Issue: ${issue} | Violation type: ${violation_type||'FCRA inaccuracy'} | Dispute history: ${dispute_history||'One dispute sent, no adequate response'}`)
+  return c.json({ success: true, agent: 'cfpb_complaint', complaint })
+})
+
+// ============================================================
+// SOP EXECUTION ENGINE — All 62 SOPs Active & Executable
+// ============================================================
+
+// GET /api/sop/list — list all available SOPs with execution stats
+app.get('/api/sop/list', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const execStats = await DB.prepare(`SELECT sop_id, COUNT(*) as run_count, MAX(created_at) as last_run FROM sop_executions GROUP BY sop_id`).all()
+  const statsMap: Record<string, any> = {}
+  for (const s of execStats.results as any[]) { statsMap[s.sop_id] = s }
+  const sopList = SOPS.map(s => ({
+    id: s.id, title: s.title, phase: s.phase, phaseName: s.phaseName,
+    category: s.category, complianceStatus: s.complianceStatus,
+    run_count: statsMap[s.id]?.run_count || 0,
+    last_run: statsMap[s.id]?.last_run || null,
+    executable: true
+  }))
+  return c.json({ sops: sopList, total: sopList.length })
+})
+
+// GET /api/sop/:sopId — get SOP detail
+app.get('/api/sop/:sopId', async (c) => {
+  const sopId = c.req.param('sopId')
+  const sop = SOPS.find(s => s.id === sopId)
+  if (!sop) return c.json({ error: 'SOP not found' }, 404)
+  return c.json({ sop })
+})
+
+// POST /api/sop/execute/:sopId — AI-execute a SOP for a client
+app.post('/api/sop/execute/:sopId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const sopId = c.req.param('sopId')
+  const sop = SOPS.find(s => s.id === sopId)
+  if (!sop) return c.json({ error: `SOP ${sopId} not found` }, 404)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, context, trigger_event } = body
+  const start = Date.now()
+
+  // Load client context if provided
+  let clientCtx = ''
+  if (client_id && DB) {
+    const cl = await DB.prepare(`SELECT first_name, last_name, credit_score_current, credit_score_goal, status FROM clients WHERE id = ?`).bind(client_id).first() as any
+    if (cl) clientCtx = `Client: ${cl.first_name} ${cl.last_name} | Score: ${cl.credit_score_current||'?'} | Goal: ${cl.credit_score_goal||'?'} | Status: ${cl.status}`
+  }
+
+  const systemPrompt = `You are the AI executor for RJ Business Solutions SOP system. You are executing SOP ${sop.id}: "${sop.title}". Your role is to provide specific, actionable execution guidance for this SOP in the context provided. The SOP summary is: ${sop.summary}. Key steps: ${sop.steps.join('; ')}. KPIs: ${sop.kpis.join('; ')}. Agent instructions: ${sop.agentInstructions || 'Follow the SOP steps precisely.'}. Compliance status: ${sop.complianceStatus}. Legal changes 2026: ${sop.legalChanges2026?.join('; ') || 'none'}. Provide: step-by-step execution checklist tailored to this context, key compliance checkpoints, estimated completion time, any 2026-specific legal considerations, and next SOP recommendations after this one completes.`
+  const userMsg = `${clientCtx ? 'Client context: '+clientCtx+'\n' : ''}${context ? 'Additional context: '+context+'\n' : ''}Trigger: ${trigger_event || 'manual execution'}\n\nExecute this SOP and provide complete guidance.`
+
+  const output = await callAISimple(env, systemPrompt, userMsg)
+  const duration = Date.now() - start
+
+  await DB.prepare(`INSERT INTO sop_executions (sop_id, sop_title, client_id, executed_by, trigger_event, input_context, ai_output, status, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(sopId, sop.title, client_id || null, body.executed_by || 'staff', trigger_event || 'manual', context || null, output, 'completed', duration).run()
+
+  if (client_id) {
+    await DB.prepare(`INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('sop_engine',?,?,'client',?)`)
+      .bind(`sop_executed_${sopId}`, sopId, `SOP "${sop.title}" executed for client in ${duration}ms`).run()
+  }
+
+  return c.json({ success: true, sop_id: sopId, sop_title: sop.title, output, duration_ms: duration })
+})
+
+// GET /api/sop/executions/:clientId — SOP execution history for a client
+app.get('/api/sop/executions/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const execs = await DB.prepare(`SELECT sop_id, sop_title, trigger_event, status, duration_ms, created_at FROM sop_executions WHERE client_id = ? ORDER BY created_at DESC LIMIT 50`).bind(clientId).all()
+  return c.json({ executions: execs.results })
+})
+
+// POST /api/sop/execute-chain — execute multiple SOPs in sequence
+app.post('/api/sop/execute-chain', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  const { client_id, sop_ids, context } = body
+  if (!sop_ids || !Array.isArray(sop_ids)) return c.json({ error: 'sop_ids array required' }, 400)
+  const results: any[] = []
+  for (const sopId of sop_ids.slice(0, 5)) { // limit to 5 SOPs per chain
+    const sop = SOPS.find(s => s.id === sopId)
+    if (!sop) { results.push({ sop_id: sopId, error: 'Not found' }); continue }
+    const start = Date.now()
+    const output = await callAISimple(env,
+      `You are executing SOP ${sop.id}: "${sop.title}". Summary: ${sop.summary}. Steps: ${sop.steps.join('; ')}. KPIs: ${sop.kpis.join('; ')}. Agent instructions: ${sop.agentInstructions||'Follow steps precisely.'}. Provide concise execution guidance.`,
+      `${context ? 'Context: '+context+'\n' : ''}Execute this SOP.`
+    )
+    const duration = Date.now() - start
+    await DB.prepare(`INSERT INTO sop_executions (sop_id, sop_title, client_id, executed_by, trigger_event, input_context, ai_output, status, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .bind(sopId, sop.title, client_id || null, body.executed_by || 'system', 'chain_execution', context || null, output, 'completed', duration).run()
+    results.push({ sop_id: sopId, sop_title: sop.title, status: 'completed', preview: output.slice(0, 200) })
+  }
+  return c.json({ success: true, executed: results.length, results })
+})
+
+// ============================================================
+// STRATEGY PLANS CRUD
+// ============================================================
+
+app.post('/api/strategy-plans', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!body.client_id) return c.json({ error: 'client_id required' }, 400)
+  const cl = await DB.prepare(`SELECT credit_score_current, credit_score_goal FROM clients WHERE id = ?`).bind(body.client_id).first() as any
+  const ins = await DB.prepare(`INSERT INTO strategy_plans (client_id, plan_name, start_date, target_date, target_score, current_score, phase1_actions, phase2_actions, phase3_actions) VALUES (?,?,COALESCE(?,date('now')),?,?,?,?,?,?)`)
+    .bind(body.client_id, body.plan_name || `90-Day Plan — ${new Date().toLocaleDateString()}`, body.start_date || null, body.target_date || null, body.target_score || cl?.credit_score_goal || null, body.current_score || cl?.credit_score_current || null, body.phase1_actions || null, body.phase2_actions || null, body.phase3_actions || null).run()
+  return c.json({ success: true, id: ins.meta?.last_row_id })
+})
+
+app.get('/api/strategy-plans/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.json({ error: 'DB required' }, 500)
+  const plans = await DB.prepare(`SELECT * FROM strategy_plans WHERE client_id = ? ORDER BY created_at DESC`).bind(parseInt(c.req.param('clientId'))).all()
+  return c.json({ plans: plans.results })
+})
+
+// ============================================================
+// FULL ANALYSIS SSR PAGE — /reports/full/:clientId
+// ============================================================
+
+app.get('/reports/full/:clientId', async (c) => {
+  const env = c.env; const { DB } = env
+  if (!DB) return c.html('<h1>DB unavailable</h1>', 500)
+  const clientId = parseInt(c.req.param('clientId'))
+  const [client, latestReport, analysis] = await Promise.all([
+    DB.prepare(`SELECT * FROM clients WHERE id = ?`).bind(clientId).first(),
+    DB.prepare(`SELECT id, pull_date, score_efx, score_tu, score_exp, total_accounts, total_negative_accounts, total_inquiries FROM credit_reports WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(clientId).first(),
+    DB.prepare(`SELECT * FROM analysis_reports WHERE client_id = ? ORDER BY id DESC LIMIT 1`).bind(clientId).first()
+  ])
+  if (!client) return c.html('<h1>Client not found</h1>', 404)
+  const cl = client as any
+  const rpt = latestReport as any
+  const ar = analysis as any
+
+  let roadmaps: any[] = []
+  if (ar) {
+    const rm = await DB.prepare(`SELECT roadmap_type, title, content, generated_at FROM roadmap_results WHERE analysis_report_id = ? ORDER BY id ASC`).bind(ar.id).all()
+    roadmaps = rm.results as any[]
+  }
+
+  const scoreAvg = rpt ? Math.round([(rpt.score_efx||0),(rpt.score_tu||0),(rpt.score_exp||0)].filter((s:number)=>s>0).reduce((a:number,b:number)=>a+b,0)/[(rpt.score_efx||0),(rpt.score_tu||0),(rpt.score_exp||0)].filter((s:number)=>s>0).length||0) : 0
+  const healthColor = ar ? (ar.overall_health_score >= 80 ? 'green' : ar.overall_health_score >= 60 ? 'yellow' : 'red') : 'gray'
+  const gradeColor: Record<string,string> = { A:'text-green-400', B:'text-blue-400', C:'text-yellow-400', D:'text-orange-400', F:'text-red-400' }
+  const roadmapIcons: Record<string,string> = { auto_loan:'🚗', mortgage:'🏠', business_funding:'💼', debt_removal:'🗑️', '90_day_plan':'📅', product_match:'💳', score_optimization:'📈', executive_summary:'📋', inquiry_removal:'🔍', rate_optimization:'💰' }
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+
+  return c.html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full Analysis — ${cl.first_name} ${cl.last_name} — ${company}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head><body class="bg-gray-950 text-white min-h-screen font-sans">
+<div class="max-w-7xl mx-auto px-4 py-8">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <div class="flex items-center gap-4">
+      <a href="/clients/${clientId}" class="text-gray-400 hover:text-white text-sm">← Back to Client</a>
+    </div>
+    <div class="flex gap-2">
+      ${rpt ? `<button onclick="runAnalysis()" id="run-btn" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-medium">Run Full Analysis</button>` : ''}
+      <a href="/clients/${clientId}" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm">Client Profile</a>
+    </div>
+  </div>
+
+  <!-- Client Hero -->
+  <div class="bg-gradient-to-r from-blue-900/40 to-purple-900/40 border border-blue-800/50 rounded-2xl p-6 mb-6">
+    <div class="flex items-start justify-between">
+      <div>
+        <h1 class="text-3xl font-bold mb-1">${cl.first_name} ${cl.last_name}</h1>
+        <p class="text-gray-400 text-sm">${cl.email || ''} ${cl.phone ? '· '+cl.phone : ''}</p>
+        ${rpt ? `<p class="text-gray-500 text-xs mt-1">Latest report: ${rpt.pull_date?.slice(0,10) || 'Unknown date'}</p>` : '<p class="text-yellow-400 text-sm mt-2">⚠ No credit report imported yet</p>'}
+      </div>
+      ${ar ? `<div class="text-center">
+        <div class="text-6xl font-black ${gradeColor[ar.health_grade]||'text-gray-400'}">${ar.health_grade||'?'}</div>
+        <div class="text-gray-400 text-xs">Credit Health</div>
+        <div class="text-2xl font-bold text-white mt-1">${ar.overall_health_score||0}/100</div>
+      </div>` : ''}
+    </div>
+
+    <!-- Score cards -->
+    ${rpt ? `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+      <div class="bg-gray-900/60 rounded-xl p-3 text-center"><p class="text-xs text-gray-400">Equifax</p><p class="text-2xl font-bold text-blue-300">${rpt.score_efx||'—'}</p></div>
+      <div class="bg-gray-900/60 rounded-xl p-3 text-center"><p class="text-xs text-gray-400">TransUnion</p><p class="text-2xl font-bold text-green-300">${rpt.score_tu||'—'}</p></div>
+      <div class="bg-gray-900/60 rounded-xl p-3 text-center"><p class="text-xs text-gray-400">Experian</p><p class="text-2xl font-bold text-purple-300">${rpt.score_exp||'—'}</p></div>
+      <div class="bg-gray-900/60 rounded-xl p-3 text-center"><p class="text-xs text-gray-400">Average</p><p class="text-2xl font-bold text-yellow-300">${scoreAvg||'—'}</p></div>
+    </div>
+    <div class="grid grid-cols-3 md:grid-cols-6 gap-2 mt-3">
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">Accounts</p><p class="font-bold">${rpt.total_accounts||0}</p></div>
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">Negatives</p><p class="font-bold text-red-400">${rpt.total_negative_accounts||0}</p></div>
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">Inquiries</p><p class="font-bold text-yellow-400">${rpt.total_inquiries||0}</p></div>
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">Goal</p><p class="font-bold text-green-400">${cl.credit_score_goal||'—'}</p></div>
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">30d Proj</p><p class="font-bold">${ar?.score_projection_30d||'—'}</p></div>
+      <div class="bg-gray-900/60 rounded-lg p-2 text-center"><p class="text-xs text-gray-500">90d Proj</p><p class="font-bold text-green-400">${ar?.score_projection_90d||'—'}</p></div>
+    </div>` : ''}
+  </div>
+
+  ${!ar ? `
+  <!-- No Analysis Yet -->
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-12 text-center mb-6">
+    <div class="text-5xl mb-4">🧠</div>
+    <h2 class="text-xl font-bold mb-2">No Analysis Run Yet</h2>
+    <p class="text-gray-400 mb-4">${rpt ? 'A credit report is on file. Click below to run the full Hyperion analysis with all 8 roadmaps.' : 'Import a MyFreeScoreNow credit report first, then run the full analysis.'}</p>
+    ${rpt ? `<button onclick="runAnalysis()" class="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-medium">Run Full Hyperion Analysis</button>` : `<a href="/clients/${clientId}" class="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-medium inline-block">Import Credit Report</a>`}
+  </div>` : `
+
+  <!-- Analysis Status Banner -->
+  <div class="bg-green-900/20 border border-green-800/50 rounded-xl p-3 mb-6 flex items-center justify-between">
+    <span class="text-green-400 text-sm">✓ Full Hyperion Analysis — ${ar.completed_at?.slice(0,16)||'Running...'} — ${ar.duration_ms ? Math.round(ar.duration_ms/1000)+'s' : 'pending'}</span>
+    <button onclick="runAnalysis()" class="text-xs text-blue-400 hover:text-blue-300">Re-run Analysis</button>
+  </div>
+
+  <!-- Tab Nav -->
+  <div class="flex gap-2 mb-6 flex-wrap" id="tab-nav">
+    <button onclick="showTab('executive')" class="tab-btn px-3 py-1.5 rounded-lg text-sm bg-blue-600 text-white">📋 Executive Summary</button>
+    <button onclick="showTab('roadmaps')" class="tab-btn px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700">🗺️ All Roadmaps</button>
+    <button onclick="showTab('legal')" class="tab-btn px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700">⚖️ Legal Audit</button>
+    <button onclick="showTab('90day')" class="tab-btn px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700">📅 90-Day Plan</button>
+    <button onclick="showTab('debt')" class="tab-btn px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700">💸 Debt Analysis</button>
+  </div>
+
+  <!-- Executive Summary Tab -->
+  <div id="tab-executive" class="tab-content">
+    <div class="bg-gray-900 rounded-2xl p-6">
+      <h2 class="text-lg font-bold mb-4">Executive Summary</h2>
+      <div class="prose prose-invert max-w-none">
+        <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.executive_summary || 'No executive summary available. Run analysis first.'}</pre>
+      </div>
+    </div>
+    ${ar.behavior_profile ? `<div class="bg-gray-900 rounded-2xl p-6 mt-4">
+      <h2 class="text-lg font-bold mb-4">🧠 Behavioral Financial Profile</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.behavior_profile}</pre>
+    </div>` : ''}
+  </div>
+
+  <!-- Roadmaps Tab -->
+  <div id="tab-roadmaps" class="tab-content hidden">
+    ${roadmaps.length === 0 ? '<div class="bg-gray-900 rounded-2xl p-8 text-center text-gray-400">No roadmaps generated yet. Run analysis first.</div>' :
+    roadmaps.map((rm: any) => `
+    <div class="bg-gray-900 rounded-2xl p-6 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-lg font-bold">${roadmapIcons[rm.roadmap_type]||'📊'} ${rm.title}</h3>
+        <span class="text-xs text-gray-500">${rm.generated_at?.slice(0,16)||''}</span>
+      </div>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${rm.content||'No content'}</pre>
+    </div>`).join('')}
+  </div>
+
+  <!-- Legal Audit Tab -->
+  <div id="tab-legal" class="tab-content hidden">
+    ${ar.metro2_violations ? `<div class="bg-gray-900 rounded-2xl p-6 mb-4">
+      <h2 class="text-lg font-bold mb-4 text-red-400">Metro 2® Compliance Audit</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.metro2_violations}</pre>
+    </div>` : ''}
+    ${ar.fcra_violations ? `<div class="bg-gray-900 rounded-2xl p-6">
+      <h2 class="text-lg font-bold mb-4 text-orange-400">FCRA / FDCPA Legal Audit</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.fcra_violations}</pre>
+    </div>` : '<div class="bg-gray-900 rounded-2xl p-8 text-center text-gray-400">No legal audit data. Run analysis.</div>'}
+  </div>
+
+  <!-- 90-Day Plan Tab -->
+  <div id="tab-90day" class="tab-content hidden">
+    <div class="bg-gray-900 rounded-2xl p-6">
+      <h2 class="text-lg font-bold mb-4">90-Day Credit Transformation Plan</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.action_plan_90day || 'No 90-day plan generated. Run analysis first.'}</pre>
+    </div>
+    ${ar.score_analysis ? `<div class="bg-gray-900 rounded-2xl p-6 mt-4">
+      <h2 class="text-lg font-bold mb-4">📈 Score Projection & Trajectory</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.score_analysis}</pre>
+    </div>` : ''}
+  </div>
+
+  <!-- Debt Analysis Tab -->
+  <div id="tab-debt" class="tab-content hidden">
+    <div class="bg-gray-900 rounded-2xl p-6">
+      <h2 class="text-lg font-bold mb-4">Debt Analysis & Payoff Strategy</h2>
+      <pre class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans">${ar.debt_analysis || 'No debt analysis available. Run analysis first.'}</pre>
+    </div>
+  </div>
+  `}
+
+  <!-- SOP Quick Executor -->
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 mt-6">
+    <h2 class="text-lg font-bold mb-4">⚙️ SOP Quick Executor</h2>
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+      ${['SOP-601','SOP-602','SOP-603','SOP-001','SOP-002','SOP-603'].map((id: string) => {
+        const s = SOPS.find((x: any) => x.id === id)
+        return s ? `<button onclick="executeSOP('${s.id}')" class="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-left text-gray-300">${s.id}: ${s.title.slice(0,30)}</button>` : ''
+      }).join('')}
+      <button onclick="showAllSOPs()" class="px-3 py-2 bg-blue-900/40 hover:bg-blue-800/40 border border-blue-800/50 rounded-lg text-sm text-blue-400">View All ${SOPS.length} SOPs →</button>
+    </div>
+    <div id="sop-output" class="mt-4 hidden">
+      <div class="text-xs text-gray-400 mb-2" id="sop-title"></div>
+      <pre id="sop-result" class="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed font-sans bg-gray-800 rounded-xl p-4 max-h-96 overflow-y-auto"></pre>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const clientId = ${clientId}
+const reportId = ${rpt ? (latestReport as any).id : 'null'}
+
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'))
+  document.querySelectorAll('.tab-btn').forEach(el => { el.classList.remove('bg-blue-600','text-white'); el.classList.add('bg-gray-800','text-gray-300') })
+  document.getElementById('tab-'+name)?.classList.remove('hidden')
+  event.target.classList.add('bg-blue-600','text-white')
+  event.target.classList.remove('bg-gray-800','text-gray-300')
+}
+
+async function runAnalysis() {
+  if (!reportId) { alert('No credit report imported yet. Please import a report first.'); return }
+  const btn = document.getElementById('run-btn')
+  if (btn) { btn.textContent = 'Running Hyperion Analysis...'; btn.disabled = true }
+  try {
+    const r = await fetch('/api/reports/analyze/'+reportId, { method: 'POST' })
+    const d = await r.json()
+    if (d.success) { alert('✓ Analysis complete! Health Score: '+d.health_score+' ('+d.health_grade+') | Roadmaps: '+d.roadmaps_generated+'. Page will reload.'); window.location.reload() }
+    else { alert('Analysis error: ' + (d.error||'unknown error')); if(btn){btn.textContent='Run Full Analysis';btn.disabled=false} }
+  } catch(e) { alert('Network error: '+e.message); if(btn){btn.textContent='Run Full Analysis';btn.disabled=false} }
+}
+
+async function executeSOP(sopId) {
+  document.getElementById('sop-output').classList.remove('hidden')
+  document.getElementById('sop-title').textContent = 'Executing ' + sopId + '...'
+  document.getElementById('sop-result').textContent = 'Running SOP — please wait...'
+  try {
+    const r = await fetch('/api/sop/execute/'+sopId, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ client_id: clientId, trigger_event: 'manual_from_analysis_page' }) })
+    const d = await r.json()
+    document.getElementById('sop-title').textContent = d.sop_title || sopId
+    document.getElementById('sop-result').textContent = d.output || d.error || 'No output'
+  } catch(e) { document.getElementById('sop-result').textContent = 'Error: '+e.message }
+}
+
+function showAllSOPs() { window.location.href = '/sop-library' }
+</script>
+</body></html>`)
+})
+
+// ============================================================
+// SOP LIBRARY SSR PAGE
+// ============================================================
+
+app.get('/sop-library', async (c) => {
+  const env = c.env; const { DB } = env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+  const phaseGroups: Record<number, any[]> = {}
+  SOPS.forEach((s: any) => {
+    if (!phaseGroups[s.phase]) phaseGroups[s.phase] = []
+    phaseGroups[s.phase].push(s)
+  })
+  return c.html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SOP Library — ${company}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head><body class="bg-gray-950 text-white min-h-screen">
+<div class="max-w-6xl mx-auto px-4 py-8">
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-bold">⚙️ SOP Library</h1>
+      <p class="text-gray-400 text-sm">${SOPS.length} Standard Operating Procedures — All Active & AI-Executable</p>
+    </div>
+    <div class="flex gap-2">
+      <input id="sop-search" placeholder="Search SOPs..." onkeyup="filterSOPs()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none">
+      <a href="/" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-sm">← Dashboard</a>
+    </div>
+  </div>
+  <div id="sop-grid">
+  ${Object.entries(phaseGroups).map(([phase, sops]) => `
+  <div class="mb-8">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 px-1">${(sops[0] as any).phaseName} (Phase ${phase})</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      ${sops.map((s: any) => `
+      <div class="sop-card bg-gray-900 rounded-xl p-4 border border-gray-800 hover:border-gray-700 cursor-pointer" onclick="selectSOP('${s.id}')" data-search="${s.id} ${s.title} ${s.category}">
+        <div class="flex items-start justify-between mb-2">
+          <div>
+            <span class="font-mono text-xs text-blue-400">${s.id}</span>
+            <h3 class="font-semibold text-sm">${s.title}</h3>
+          </div>
+          <span class="text-xs px-2 py-0.5 rounded-full ${s.complianceStatus === 'critical' ? 'bg-red-900/50 text-red-400' : 'bg-green-900/50 text-green-400'}">${s.complianceStatus}</span>
+        </div>
+        <p class="text-xs text-gray-400 mb-2">${s.summary?.slice(0,100)||''}</p>
+        <div class="flex gap-2">
+          <span class="text-xs text-gray-600">${s.category}</span>
+          <button onclick="event.stopPropagation(); executeSOP('${s.id}')" class="ml-auto text-xs text-blue-400 hover:text-blue-300">Execute →</button>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>`).join('')}
+  </div>
+
+  <!-- SOP Detail Panel -->
+  <div id="sop-panel" class="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 p-4 hidden max-h-96 overflow-y-auto">
+    <div class="max-w-6xl mx-auto">
+      <div class="flex items-center justify-between mb-3">
+        <h3 id="panel-title" class="font-bold"></h3>
+        <div class="flex gap-2">
+          <button id="panel-execute-btn" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm">Execute with AI</button>
+          <button onclick="closePanel()" class="px-3 py-1 bg-gray-700 rounded-lg text-sm">Close</button>
+        </div>
+      </div>
+      <pre id="panel-content" class="whitespace-pre-wrap text-sm text-gray-300 font-sans"></pre>
+    </div>
+  </div>
+</div>
+
+<div id="exec-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+  <div class="bg-gray-900 rounded-2xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+    <h3 id="exec-title" class="font-bold mb-4"></h3>
+    <textarea id="exec-context" placeholder="Optional: Enter client context or additional details..." class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm mb-3 h-20 resize-none"></textarea>
+    <div class="flex gap-2 mb-4">
+      <button onclick="runSOPExec()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm flex-1">Run SOP</button>
+      <button onclick="closeExec()" class="px-4 py-2 bg-gray-700 rounded-xl text-sm">Cancel</button>
+    </div>
+    <pre id="exec-output" class="whitespace-pre-wrap text-sm text-gray-300 font-sans bg-gray-800 rounded-xl p-4 hidden"></pre>
+  </div>
+</div>
+
+<script>
+let currentSOP = null
+function filterSOPs() {
+  const q = document.getElementById('sop-search').value.toLowerCase()
+  document.querySelectorAll('.sop-card').forEach(el => {
+    el.style.display = el.dataset.search.toLowerCase().includes(q) ? '' : 'none'
+  })
+}
+function selectSOP(id) {
+  const sopData = ${JSON.stringify(SOPS.map((s:any) => ({ id: s.id, title: s.title, summary: s.summary, steps: s.steps, kpis: s.kpis, agentInstructions: s.agentInstructions })))}
+  const s = sopData.find(x => x.id === id)
+  if (!s) return
+  currentSOP = id
+  document.getElementById('sop-panel').classList.remove('hidden')
+  document.getElementById('panel-title').textContent = id + ': ' + s.title
+  document.getElementById('panel-content').textContent = 'SUMMARY: ' + s.summary + '\\n\\nSTEPS:\\n' + s.steps.map((st, i) => (i+1)+'. '+st).join('\\n') + '\\n\\nKPIs:\\n' + s.kpis.join('\\n') + (s.agentInstructions ? '\\n\\nAGENT INSTRUCTIONS:\\n' + s.agentInstructions : '')
+  document.getElementById('panel-execute-btn').onclick = () => executeSOP(id)
+}
+function closePanel() { document.getElementById('sop-panel').classList.add('hidden') }
+function executeSOP(id) {
+  currentSOP = id
+  const sopData = ${JSON.stringify(SOPS.map((s:any) => ({ id: s.id, title: s.title })))}
+  const s = sopData.find(x => x.id === id)
+  document.getElementById('exec-title').textContent = (s?.id||id) + ': ' + (s?.title||'SOP')
+  document.getElementById('exec-output').classList.add('hidden')
+  document.getElementById('exec-output').textContent = ''
+  document.getElementById('exec-modal').classList.remove('hidden')
+}
+function closeExec() { document.getElementById('exec-modal').classList.add('hidden') }
+async function runSOPExec() {
+  const ctx = document.getElementById('exec-context').value
+  const out = document.getElementById('exec-output')
+  out.textContent = 'Running SOP with AI...'
+  out.classList.remove('hidden')
+  try {
+    const r = await fetch('/api/sop/execute/'+currentSOP, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ context: ctx, trigger_event: 'manual_sop_library' }) })
+    const d = await r.json()
+    out.textContent = d.output || d.error || 'No output'
+  } catch(e) { out.textContent = 'Error: '+e.message }
+}
+</script>
+</body></html>`)
 })
 
 export default app

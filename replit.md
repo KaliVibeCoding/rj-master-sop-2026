@@ -14,17 +14,19 @@ A full-stack credit repair business operations platform + complete SaaS infrastr
 - **Styling**: Tailwind CSS (CDN in dev)
 
 ## Stats
-- **249 route handlers** across 36 feature groups
-- **7,720+ lines** of TypeScript in `src/index.tsx`
-- **49 database tables** across 7 migrations
+- **270 route handlers** across 40 feature groups
+- **8,543 lines** of TypeScript in `src/index.tsx`
+- **53 database tables** across 8 migrations
 - **90 environment variables** across 12 categories
-- **62 SOPs** across 7 phases
+- **62 SOPs** across 7 phases — all AI-executable via `/api/sop/execute/:sopId`
 - **239+ templates** in `src/templates.ts`
 - **6 email sequences** + **5 SMS sequences** (seeded)
 - **4 staff users** (seeded)
 - **10 compliance rules** seeded (CROA, FCRA, TCPA, FDCPA, TSR, CAN-SPAM)
 - **5 compliance sources** seeded (CFPB, FTC, FCC, Federal Register, eCFR)
 - **2 legal templates** seeded (croa_disclosure, cancellation_notice)
+- **15 AI agents** total (7 original + 8 new Hyperion agents)
+- **8 roadmaps** auto-generated per MFSN report (auto loan, mortgage, business funding, debt removal, 90-day plan, score optimization, product match, executive summary)
 
 ## New Features (Migration 0006)
 - **Staff Auth** — `/login` page, `POST /api/auth/login` (SHA-256 + D1 sessions, HTTPOnly cookie, 8hr expiry), logout, `/api/auth/me`, `/api/auth/sessions`

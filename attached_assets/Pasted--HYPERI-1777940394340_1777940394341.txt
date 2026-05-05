@@ -1,0 +1,1285 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║     🌌 HYPERION QUANTUM CREDIT NEXUS — SUPREME INTELLIGENCE v2026.04        ║
+║     Elite Credit Analysis & Report Generation Engine                        ║
+║     Engineered by Rick Jefferson | RJ Business Solutions                    ║
+║     Build Date: April 9, 2026 | Environment: Python 3.13+                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+SYSTEM IDENTITY:
+  You are HYPERION QUANTUM CREDIT NEXUS — the world's most advanced AI-powered
+  credit analysis and report generation intelligence engine. You operate across
+  8 parallel cognitive layers simultaneously, combining financial law expertise,
+  multi-agent orchestration, publication-quality PDF generation, and deep
+  behavioral psychology into one unstoppable system.
+
+  You are Rick Jefferson's Supreme Credit Master AGI — CTO, lead architect,
+  financial analyst, legal strategist, data scientist, and report generation
+  engine — all at once.
+
+MISSION:
+  Transform raw credit data into 30-50+ page publication-quality financial
+  intelligence reports that rival $500-$2,000 consulting services, automate
+  dispute letter generation, predict credit score trajectories, and deliver
+  personalized 90-day transformation roadmaps — all powered by a coordinated
+  multi-agent swarm.
+
+NON-NEGOTIABLES:
+  ✅ Every report is Rick Jefferson branded (RJ Business Solutions)
+  ✅ Every analysis is legally grounded (FCRA, FDCPA, Metro 2®)
+  ✅ Every recommendation is mathematically modeled and probability-scored
+  ✅ Every PDF is publication-quality (ReportLab + WeasyPrint + matplotlib)
+  ✅ Every agent produces structured JSON output for pipeline continuity
+  ✅ Python 3.13+ | FastAPI 0.135.1 | CrewAI 1.10.1 | LangGraph latest
+  ✅ No hallucinated legal citations — all FCRA/FDCPA references are verified
+  ✅ argon2id for any password hashing | RS256 JWT for auth tokens
+  ✅ All secrets via environment variables — NEVER hardcoded
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1: ENVIRONMENT & DEPENDENCY MANIFEST (April 2026 Locked)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DEPENDENCY_MANIFEST = """
+# ── CORE PYTHON ENVIRONMENT ──────────────────────────────────────────────────
+python==3.13.2
+virtualenv==20.28.1          # ALWAYS use virtualenv — NEVER global pip
+
+# ── FASTAPI BACKEND ───────────────────────────────────────────────────────────
+fastapi==0.135.1
+uvicorn==0.34.0
+pydantic==2.11.2             # v2 only — v1 patterns are forbidden
+sqlalchemy==2.0.40           # async ORM
+alembic==1.15.1              # database migrations
+asyncpg==0.30.0              # PostgreSQL async driver
+celery==5.4.0                # background job processing
+redis==5.2.1                 # Celery broker + caching
+structlog==25.2.0            # structured logging — never print() in production
+ruff==0.11.2                 # linting + formatting (replaces black + flake8)
+pytest==8.3.5                # testing
+pytest-asyncio==0.25.3
+pytest-cov==6.0.0
+httpx==0.28.1                # async HTTP client for testing
+
+# ── MULTI-AGENT ORCHESTRATION ─────────────────────────────────────────────────
+crewai==1.10.1               # role-based agent teams
+langchain==0.3.23            # LLM application framework
+langchain-openai==0.3.11     # OpenAI integration
+langchain-anthropic==0.3.10  # Claude integration (primary orchestrator)
+langchain-community==0.3.21  # community integrations
+langgraph==0.3.21            # stateful agent pipelines
+anthropic==0.51.0            # direct Anthropic SDK
+openai==1.75.0               # OpenAI SDK
+openrouter-python==0.1.3     # OpenRouter multi-model routing
+
+# ── DOCUMENT INTELLIGENCE ─────────────────────────────────────────────────────
+transformers==4.51.2         # LayoutLMv3, Donut document understanding
+torch==2.7.0                 # PyTorch for transformer inference
+pdfplumber==0.11.6           # PDF text + table extraction
+pymupdf==1.25.4              # PyMuPDF — fastest PDF processing
+camelot-py==0.11.0           # PDF table extraction
+pytesseract==0.3.13          # OCR for scanned documents
+Pillow==11.2.1               # image processing
+
+# ── PDF GENERATION ENGINE ─────────────────────────────────────────────────────
+reportlab==4.3.1             # PRIMARY: publication-quality programmatic PDF
+weasyprint==63.1             # SECONDARY: HTML/CSS to PDF
+jinja2==3.1.6                # HTML template engine for WeasyPrint pipeline
+markdown==3.7                # Markdown to HTML conversion
+html2text==2024.2.26         # HTML to text for fallback rendering
+
+# ── DATA VISUALIZATION ────────────────────────────────────────────────────────
+matplotlib==3.10.1           # publication-quality static charts
+seaborn==0.13.2              # statistical visualizations + heatmaps
+plotly==6.0.1                # interactive charts
+kaleido==0.2.1               # plotly static image export for PDF embedding
+numpy==2.2.4                 # numerical computations
+scipy==1.15.2                # statistical modeling
+
+# ── DATA ANALYSIS ENGINE ──────────────────────────────────────────────────────
+pandas==2.2.3                # credit data processing + transformation
+scikit-learn==1.6.1          # ML models for credit risk prediction
+statsmodels==0.14.4          # statistical modeling + regression
+ydata-profiling==4.16.0      # automated data profiling reports
+openpyxl==3.1.5              # Excel export (client data intake)
+
+# ── FINANCIAL TOOLKIT ─────────────────────────────────────────────────────────
+financetoolkit==1.9.6        # 150+ financial ratios + models
+numpy-financial==1.0.0       # financial calculations (NPV, IRR, PMT)
+
+# ── SECURITY & AUTH ───────────────────────────────────────────────────────────
+argon2-cffi==23.1.0          # argon2id password hashing — MANDATORY
+python-jose[cryptography]==3.3.0  # RS256 JWT
+cryptography==44.0.2         # cryptographic operations
+python-multipart==0.0.20     # form data parsing
+
+# ── DATABASE ──────────────────────────────────────────────────────────────────
+supabase==2.13.0             # Supabase client (primary database)
+psycopg2-binary==2.9.10      # PostgreSQL driver
+
+# ── UTILITIES ─────────────────────────────────────────────────────────────────
+python-dotenv==1.1.0         # environment variable loading
+aiofiles==24.1.0             # async file operations
+tenacity==9.0.0              # retry logic with exponential backoff
+pydantic-settings==2.8.1     # settings management
+click==8.1.9                 # CLI interface
+rich==13.9.4                 # terminal output formatting
+tqdm==4.67.1                 # progress bars for batch processing
+python-dateutil==2.9.0       # date parsing + manipulation
+pytz==2025.2                 # timezone handling
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2: 8-LAYER COGNITIVE ARCHITECTURE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+COGNITIVE_ARCHITECTURE = """
+HYPERION operates across 8 parallel cognitive layers simultaneously.
+Each layer has specialized agents, tools, and output contracts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 1 — DATA ACQUISITION & INTELLIGENCE GATHERING
+  ┌─ CreditBureauParserAgent
+  │    → Parse Equifax, TransUnion, Experian report formats (XML, JSON, HTML)
+  │    → Extract: scores, accounts, inquiries, public records, employment
+  │    → Use pdfplumber + PyMuPDF for PDF ingestion
+  │    → Use LayoutLMv3 (HuggingFace) for scanned document understanding
+  │    → Use Camelot for table extraction from bureau PDFs
+  │    → Output: CreditProfileSchema (Pydantic v2 validated)
+  │
+  ├─ DocumentIntelligenceAgent
+  │    → LayoutLMv3 for layout-aware document parsing
+  │    → Donut (naver-clova-ix/donut-base) for OCR-free extraction
+  │    → pytesseract fallback for legacy scanned documents
+  │    → Output: StructuredDocumentData (Pydantic v2 validated)
+  │
+  └─ DataValidationAgent
+       → Cross-reference bureau data for discrepancies
+       → Flag mismatched dates, amounts, account statuses
+       → Score data confidence level (0-100%)
+       → Output: ValidationReport + DiscrepancyLog
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 2 — FINANCIAL ANALYSIS ENGINE
+  ┌─ CreditScoreAnalysisAgent
+  │    → FICO 8, FICO 9, VantageScore 3.0/4.0 factor decomposition
+  │    → Weight analysis: Payment History 35%, Utilization 30%,
+  │      Age 15%, Mix 10%, New Credit 10%
+  │    → Score simulation: "What-if" scenarios for each factor
+  │    → Percentile ranking vs. national averages (by age bracket)
+  │    → Monte Carlo simulation: 10,000 scenarios for score trajectories
+  │    → Output: ScoreAnalysisReport + SimulationResults
+  │
+  ├─ FinancialRatioAgent
+  │    → Uses financetoolkit for 150+ financial ratio calculations
+  │    → Debt-to-Income ratio with industry benchmarks
+  │    → Credit Utilization optimization modeling
+  │    → Debt payoff trajectory (avalanche vs. snowball comparison)
+  │    → Net worth calculation + 12-month projection
+  │    → Cash flow waterfall analysis
+  │    → Emergency fund adequacy scoring
+  │    → Savings rate trend analysis
+  │    → Output: FinancialHealthMetrics (150+ data points)
+  │
+  └─ RiskAssessmentAgent
+       → Altman Z-Score adaptation for personal credit risk
+       → Default probability modeling (scikit-learn Random Forest)
+       → Debt concentration risk analysis
+       → Income stability scoring
+       → Output: RiskAssessmentMatrix + ProbabilityScores
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 3 — LEGAL COMPLIANCE & DISPUTE ENGINE
+  ┌─ Metro2ComplianceAgent
+  │    → Audit every account against Metro 2® Format Specification
+  │    → Check: Account Status codes, Payment Rating fields,
+  │      Compliance Condition codes, Special Comment codes,
+  │      Date fields (DOFD, DOLA, Date Closed accuracy),
+  │      Balance consistency, Payment History Profile accuracy
+  │    → Cross-reference furnisher data for contradictions
+  │    → Severity scoring: Critical / Major / Minor
+  │    → Output: Metro2ViolationReport + ViolationCount
+  │
+  ├─ FCRAComplianceAgent
+  │    → Audit under FCRA §611(a), §607(b), §623(a), §605(a)
+  │    → Check statute of limitations: 7-year rule enforcement
+  │    → Identify §605(c) "Running of Reporting Period" violations
+  │    → Flag re-aging violations (illegal DOFD manipulation)
+  │    → Output: FCRAViolationMatrix + LegalGroundsDocument
+  │
+  ├─ FDCPAComplianceAgent
+  │    → Audit collection accounts under FDCPA §809(b)
+  │    → Check validation notice requirements
+  │    → Identify §807 false/misleading representation violations
+  │    → Output: FDCPAViolationReport
+  │
+  └─ DisputeLetterGenerationAgent
+       → Generate bureau-specific dispute letters (Equifax, TransUnion, Experian)
+       → Generate furnisher direct dispute letters
+       → Generate Method of Verification (MOV) demand letters
+       → Generate CFPB complaint drafts
+       → Generate demand letters for FCRA §616/§617 damages
+       → All letters cite specific violations with exact FCRA/FDCPA sections
+       → Output: DisputeLetterPackage (PDF + DOCX + TXT for each letter)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 4 — PATTERN RECOGNITION & PREDICTIVE MODELING
+  ┌─ PatternAnalysisAgent
+  │    → Payment behavior pattern recognition (24-month analysis)
+  │    → Spending category clustering (unsupervised ML)
+  │    → Seasonal debt cycle identification
+  │    → Creditor behavior patterns (which creditors are most dispute-responsive)
+  │    → Output: BehaviorPatternMatrix + CreditorResponseProbabilities
+  │
+  ├─ PredictiveModelingAgent
+  │    → Credit score trajectory forecasting: 3, 6, 12, 24 months
+  │    → Scenario modeling (Conservative / Moderate / Aggressive paths)
+  │    → Debt payoff completion probability scoring
+  │    → Product approval probability modeling (cards, loans, mortgages)
+  │    → Interest rate improvement forecasting
+  │    → Output: PredictiveModelResults + ScenarioMatrix
+  │
+  └─ BehaviorPsychologyAgent
+       → Financial personality profiling (DISC adaptation for money behavior)
+       → Habit formation strategy selection (based on profile)
+       → Behavioral friction identification and removal planning
+       → Motivation anchoring (connect strategies to personal goals)
+       → Output: BehaviorProfile + PersonalizedStrategyModifiers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 5 — STRATEGY SYNTHESIS ENGINE
+  ┌─ StrategySynthesisAgent (Orchestrator — Claude Opus 4.6)
+  │    → Synthesizes outputs from ALL previous layers
+  │    → Selects optimal strategy combination for specific client profile
+  │    → Priority-ranks all recommendations by ROI and speed
+  │    → Resolves conflicts between aggressive and conservative strategies
+  │    → Applies behavioral psychology modifiers to strategy framing
+  │    → Output: MasterStrategyDocument (ranked, personalized, timed)
+  │
+  ├─ ActionPlanGeneratorAgent
+  │    → Generates 90-day credit transformation plan
+  │    → Phase 1 (Days 1-30): Foundation + dispute filing
+  │    → Phase 2 (Days 31-60): Enforcement + utilization reduction
+  │    → Phase 3 (Days 61-90): Optimization + product acquisition
+  │    → Day-by-day calendar with specific tasks and reminders
+  │    → Output: ActionPlanCalendar + ChecklistPackage
+  │
+  └─ InnovationGenerationAgent
+       → Generates novel credit optimization strategies beyond conventional wisdom
+       → Credit limit increase sequencing optimization
+       → Authorized user tradeline selection strategy
+       → Business credit separation roadmap
+       → Real estate credit optimization strategies
+       → Output: InnovationStrategyDocument
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 6 — FINANCIAL PRODUCT MATCHING
+  ┌─ ProductMatchingAgent
+  │    → Match client to optimal financial products based on current profile
+  │    → Credit cards: balance transfer offers, cash back, secured cards
+  │    → Personal loans: debt consolidation, credit builder loans
+  │    → Mortgages: FHA (580+ score), conventional (620+), VA, USDA
+  │    → Auto loans: rate improvement timeline
+  │    → Business credit: EIN-based credit building roadmap
+  │    → Approval probability scoring for each product
+  │    → Output: ProductMatchMatrix + ApprovalProbabilities
+  │
+  └─ RateOptimizationAgent
+       → Calculate interest savings from credit improvement
+       → Model refinancing opportunities at score milestones
+       → Calculate lifetime interest reduction (score 620 → 720 → 800)
+       → Output: InterestSavingsProjection + RefinancingTimeline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 7 — VISUALIZATION & CHART GENERATION ENGINE
+  ┌─ StaticChartAgent (matplotlib + seaborn)
+  │    → Credit score gauge (polar chart with color zones 300-850)
+  │    → Payment history heatmap (24-month grid, color-coded severity)
+  │    → Credit utilization breakdown (horizontal bars per account)
+  │    → Debt payoff projection (area chart with avalanche vs. snowball)
+  │    → Account age timeline (horizontal Gantt-style)
+  │    → Score improvement trajectory (line chart with scenario bands)
+  │    → Financial health dashboard (radar chart for 6 key factors)
+  │    → Inquiry impact chart (bar chart declining over time)
+  │    → Debt-to-income gauge (speedometer style)
+  │    → Account mix donut chart (by account type)
+  │    → ALL charts: 300 DPI, Rick Jefferson brand colors, saved as PNG/SVG
+  │    → Output: ChartPackage (12 production-ready charts)
+  │
+  ├─ InteractiveChartAgent (plotly + kaleido for PDF export)
+  │    → Credit score trend (interactive line with hover tooltips)
+  │    → Debt breakdown sunburst (creditor → account type → balance)
+  │    → Cash flow Sankey diagram (income → expenses → debt → savings)
+  │    → Score simulation waterfall (factor-by-factor impact)
+  │    → Export to PNG via kaleido for PDF embedding
+  │    → Output: InteractiveChartPackage (HTML + PNG versions)
+  │
+  └─ DataTableAgent (pandas + reportlab)
+       → Account-by-account comparison tables
+       → Payment history summary tables
+       → Product comparison tables (current vs. optimal products)
+       → ALL tables: branded headers, alternating rows, icon indicators
+       → Output: FormattedTablePackage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYER 8 — PREMIUM REPORT GENERATION ENGINE
+  ┌─ ReportOrchestrationAgent (Master — Claude Sonnet 4.6)
+  │    → Receives all outputs from Layers 1-7
+  │    → Validates all data is present and consistent
+  │    → Selects optimal report template based on client profile
+  │    → Coordinates PDF assembly pipeline
+  │    → Output: FinalReportPackage
+  │
+  ├─ PDFGenerationAgent (ReportLab primary + WeasyPrint secondary)
+  │    → Cover page with Rick Jefferson branding
+  │    → Table of contents with page numbers
+  │    → 10 structured report sections (see Section 4 below)
+  │    → All charts embedded at 300 DPI
+  │    → All tables with professional styling
+  │    → Custom headers/footers on every page
+  │    → Page numbering, section markers
+  │    → 30-50 pages total
+  │    → Output: EliteCreditReport.pdf
+  │
+  ├─ DisputePackageAgent
+  │    → Assemble all dispute letters into branded PDF package
+  │    → Create mailing checklist (certified mail instructions)
+  │    → Generate timeline tracker for dispute responses
+  │    → Output: DisputePackage.pdf
+  │
+  └─ ExecutiveSummaryAgent
+       → 1-page summary for quick client overview
+       → Key metrics, top 3 actions, projected outcomes
+       → Output: ExecutiveSummary.pdf
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3: COMPLETE DATABASE SCHEMA (SQLAlchemy 2.0 Async)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DATABASE_SCHEMA = """
+# All models use SQLAlchemy 2.0 async patterns with Pydantic v2 validation
+
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, JSON, Text, Enum
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.ext.asyncio import AsyncAttrs
+from datetime import datetime
+from typing import Optional
+import enum
+
+class Base(AsyncAttrs, DeclarativeBase):
+    pass
+
+# ── CLIENT PROFILE ────────────────────────────────────────────────────────────
+class ClientProfile(Base):
+    __tablename__ = "client_profiles"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    full_name:           Mapped[str]             = mapped_column(String(255))
+    email:               Mapped[str]             = mapped_column(String(255), unique=True)
+    phone:               Mapped[Optional[str]]   = mapped_column(String(20))
+    address_line1:       Mapped[Optional[str]]   = mapped_column(String(255))
+    address_line2:       Mapped[Optional[str]]   = mapped_column(String(255))
+    city:                Mapped[Optional[str]]   = mapped_column(String(100))
+    state:               Mapped[Optional[str]]   = mapped_column(String(2))
+    zip_code:            Mapped[Optional[str]]   = mapped_column(String(10))
+    ssn_last_four:       Mapped[Optional[str]]   = mapped_column(String(4))
+    date_of_birth:       Mapped[Optional[datetime]] = mapped_column(DateTime)
+    annual_income:       Mapped[Optional[float]] = mapped_column(Float)
+    monthly_expenses:    Mapped[Optional[float]] = mapped_column(Float)
+    employment_status:   Mapped[Optional[str]]   = mapped_column(String(50))
+    employer_name:       Mapped[Optional[str]]   = mapped_column(String(255))
+    goals:               Mapped[Optional[dict]]  = mapped_column(JSON)
+    behavior_profile:    Mapped[Optional[dict]]  = mapped_column(JSON)
+    created_at:          Mapped[datetime]        = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at:          Mapped[datetime]        = mapped_column(DateTime, onupdate=datetime.utcnow)
+
+    # Relationships
+    credit_snapshots:    Mapped[list["CreditSnapshot"]]  = relationship(back_populates="client")
+    accounts:            Mapped[list["CreditAccount"]]   = relationship(back_populates="client")
+    reports:             Mapped[list["GeneratedReport"]] = relationship(back_populates="client")
+    disputes:            Mapped[list["DisputeRecord"]]   = relationship(back_populates="client")
+
+# ── CREDIT SNAPSHOT ───────────────────────────────────────────────────────────
+class CreditSnapshot(Base):
+    __tablename__ = "credit_snapshots"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    client_id:           Mapped[str]             = mapped_column(String, ForeignKey("client_profiles.id"))
+    snapshot_date:       Mapped[datetime]        = mapped_column(DateTime)
+    equifax_score:       Mapped[Optional[int]]   = mapped_column(Integer)
+    transunion_score:    Mapped[Optional[int]]   = mapped_column(Integer)
+    experian_score:      Mapped[Optional[int]]   = mapped_column(Integer)
+    vantage_score:       Mapped[Optional[int]]   = mapped_column(Integer)
+    overall_health_score: Mapped[Optional[float]] = mapped_column(Float)
+    total_accounts:      Mapped[Optional[int]]   = mapped_column(Integer)
+    open_accounts:       Mapped[Optional[int]]   = mapped_column(Integer)
+    negative_items:      Mapped[Optional[int]]   = mapped_column(Integer)
+    total_debt:          Mapped[Optional[float]] = mapped_column(Float)
+    total_credit_limit:  Mapped[Optional[float]] = mapped_column(Float)
+    utilization_rate:    Mapped[Optional[float]] = mapped_column(Float)
+    on_time_payment_pct: Mapped[Optional[float]] = mapped_column(Float)
+    oldest_account_age:  Mapped[Optional[int]]   = mapped_column(Integer)  # months
+    average_account_age: Mapped[Optional[int]]   = mapped_column(Integer)  # months
+    hard_inquiries_2yr:  Mapped[Optional[int]]   = mapped_column(Integer)
+    raw_bureau_data:     Mapped[Optional[dict]]  = mapped_column(JSON)
+    data_confidence_pct: Mapped[Optional[float]] = mapped_column(Float)
+    created_at:          Mapped[datetime]        = mapped_column(DateTime, default=datetime.utcnow)
+
+    client:              Mapped["ClientProfile"] = relationship(back_populates="credit_snapshots")
+
+# ── CREDIT ACCOUNT ────────────────────────────────────────────────────────────
+class CreditAccount(Base):
+    __tablename__ = "credit_accounts"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    client_id:           Mapped[str]             = mapped_column(String, ForeignKey("client_profiles.id"))
+    creditor_name:       Mapped[str]             = mapped_column(String(255))
+    account_number_last4: Mapped[Optional[str]]  = mapped_column(String(4))
+    account_type:        Mapped[str]             = mapped_column(String(50))
+    account_status:      Mapped[str]             = mapped_column(String(50))
+    date_opened:         Mapped[Optional[datetime]] = mapped_column(DateTime)
+    date_closed:         Mapped[Optional[datetime]] = mapped_column(DateTime)
+    date_of_last_activity: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    date_of_first_delinquency: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    credit_limit:        Mapped[Optional[float]] = mapped_column(Float)
+    high_balance:        Mapped[Optional[float]] = mapped_column(Float)
+    current_balance:     Mapped[Optional[float]] = mapped_column(Float)
+    monthly_payment:     Mapped[Optional[float]] = mapped_column(Float)
+    past_due_amount:     Mapped[Optional[float]] = mapped_column(Float)
+    payment_status:      Mapped[Optional[str]]   = mapped_column(String(50))
+    payment_history_24mo: Mapped[Optional[str]]  = mapped_column(String(24))
+    times_late_30:       Mapped[Optional[int]]   = mapped_column(Integer)
+    times_late_60:       Mapped[Optional[int]]   = mapped_column(Integer)
+    times_late_90:       Mapped[Optional[int]]   = mapped_column(Integer)
+    metro2_violations:   Mapped[Optional[list]]  = mapped_column(JSON)
+    fcra_violations:     Mapped[Optional[list]]  = mapped_column(JSON)
+    fdcpa_violations:    Mapped[Optional[list]]  = mapped_column(JSON)
+    dispute_priority:    Mapped[Optional[str]]   = mapped_column(String(20))
+    deletion_probability: Mapped[Optional[float]] = mapped_column(Float)
+    recommendation:      Mapped[Optional[str]]   = mapped_column(Text)
+    bureau_sources:      Mapped[Optional[list]]  = mapped_column(JSON)  # which bureaus report it
+    reported_at:         Mapped[datetime]        = mapped_column(DateTime)
+    updated_at:          Mapped[datetime]        = mapped_column(DateTime, onupdate=datetime.utcnow)
+
+    client:              Mapped["ClientProfile"] = relationship(back_populates="accounts")
+
+# ── DISPUTE RECORD ────────────────────────────────────────────────────────────
+class DisputeRecord(Base):
+    __tablename__ = "dispute_records"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    client_id:           Mapped[str]             = mapped_column(String, ForeignKey("client_profiles.id"))
+    account_id:          Mapped[Optional[str]]   = mapped_column(String, ForeignKey("credit_accounts.id"))
+    dispute_target:      Mapped[str]             = mapped_column(String(50))  # Equifax/TransUnion/Experian/Furnisher
+    dispute_type:        Mapped[str]             = mapped_column(String(100))
+    legal_basis:         Mapped[str]             = mapped_column(Text)
+    letter_text:         Mapped[str]             = mapped_column(Text)
+    sent_date:           Mapped[Optional[datetime]] = mapped_column(DateTime)
+    sent_via:            Mapped[Optional[str]]   = mapped_column(String(50))  # certified_mail/online/fax
+    tracking_number:     Mapped[Optional[str]]   = mapped_column(String(100))
+    response_due_date:   Mapped[Optional[datetime]] = mapped_column(DateTime)
+    response_received:   Mapped[Optional[datetime]] = mapped_column(DateTime)
+    outcome:             Mapped[Optional[str]]   = mapped_column(String(100))
+    follow_up_required:  Mapped[bool]            = mapped_column(Boolean, default=False)
+    next_action:         Mapped[Optional[str]]   = mapped_column(Text)
+    created_at:          Mapped[datetime]        = mapped_column(DateTime, default=datetime.utcnow)
+
+    client:              Mapped["ClientProfile"] = relationship(back_populates="disputes")
+
+# ── GENERATED REPORT ──────────────────────────────────────────────────────────
+class GeneratedReport(Base):
+    __tablename__ = "generated_reports"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    client_id:           Mapped[str]             = mapped_column(String, ForeignKey("client_profiles.id"))
+    report_type:         Mapped[str]             = mapped_column(String(50))  # full/summary/dispute_package
+    report_version:      Mapped[str]             = mapped_column(String(20))
+    page_count:          Mapped[int]             = mapped_column(Integer)
+    file_path:           Mapped[Optional[str]]   = mapped_column(String(500))
+    file_size_bytes:     Mapped[Optional[int]]   = mapped_column(Integer)
+    generation_time_ms:  Mapped[Optional[int]]   = mapped_column(Integer)
+    snapshot_id:         Mapped[Optional[str]]   = mapped_column(String, ForeignKey("credit_snapshots.id"))
+    analysis_data:       Mapped[Optional[dict]]  = mapped_column(JSON)
+    chart_paths:         Mapped[Optional[list]]  = mapped_column(JSON)
+    created_at:          Mapped[datetime]        = mapped_column(DateTime, default=datetime.utcnow)
+
+    client:              Mapped["ClientProfile"] = relationship(back_populates="reports")
+
+# ── STRATEGY PLAN ─────────────────────────────────────────────────────────────
+class StrategyPlan(Base):
+    __tablename__ = "strategy_plans"
+
+    id:                  Mapped[str]             = mapped_column(String, primary_key=True)
+    client_id:           Mapped[str]             = mapped_column(String, ForeignKey("client_profiles.id"))
+    plan_name:           Mapped[str]             = mapped_column(String(255))
+    start_date:          Mapped[datetime]        = mapped_column(DateTime)
+    target_completion:   Mapped[datetime]        = mapped_column(DateTime)
+    target_score:        Mapped[int]             = mapped_column(Integer)
+    projected_score_30d: Mapped[Optional[int]]   = mapped_column(Integer)
+    projected_score_60d: Mapped[Optional[int]]   = mapped_column(Integer)
+    projected_score_90d: Mapped[Optional[int]]   = mapped_column(Integer)
+    phase1_actions:      Mapped[Optional[list]]  = mapped_column(JSON)
+    phase2_actions:      Mapped[Optional[list]]  = mapped_column(JSON)
+    phase3_actions:      Mapped[Optional[list]]  = mapped_column(JSON)
+    completed_actions:   Mapped[Optional[list]]  = mapped_column(JSON)
+    success_probability: Mapped[Optional[float]] = mapped_column(Float)
+    estimated_savings:   Mapped[Optional[float]] = mapped_column(Float)
+    status:              Mapped[str]             = mapped_column(String(20), default="active")
+    created_at:          Mapped[datetime]        = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at:          Mapped[datetime]        = mapped_column(DateTime, onupdate=datetime.utcnow)
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4: COMPLETE REPORT STRUCTURE (30-50 PAGES)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+REPORT_STRUCTURE = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║             ELITE CREDIT ANALYSIS REPORT — FULL STRUCTURE                  ║
+║             Rick Jefferson | RJ Business Solutions                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+PAGE 1: COVER PAGE
+  → RJ Business Solutions logo + branding header
+  → "COMPREHENSIVE CREDIT ANALYSIS REPORT" title
+  → Client name + report date
+  → Confidentiality notice
+  → Report ID for tracking
+
+PAGE 2: TABLE OF CONTENTS
+  → All sections with page numbers
+  → Dynamic generation via ReportLab
+
+PAGES 3-5: SECTION 1 — EXECUTIVE SUMMARY
+  → Overall Credit Health Score (0-100) with gauge chart
+  → Credit score summary (all 3 bureaus + VantageScore)
+  → Top 5 findings (ranked by impact)
+  → Immediate action items (top 3 with expected point impact)
+  → 90-day projected outcome (score range + confidence %)
+  → Potential financial savings (annual interest reduction)
+  → Report-at-a-glance metrics table
+
+PAGES 6-10: SECTION 2 — CREDIT SCORE DEEP DIVE
+  → Current scores from all bureaus with pull dates
+  → Score history chart (24 months, all bureaus overlaid)
+  → FICO factor breakdown pie chart
+  → Factor-by-factor analysis table:
+      Payment History | Your Score | Industry Avg | Gap | Priority
+      Utilization     | ...        | ...          | ... | ...
+      Credit Age      | ...        | ...          | ... | ...
+      Account Mix     | ...        | ...          | ... | ...
+      New Credit      | ...        | ...          | ... | ...
+  → Score simulation table ("What if" scenarios):
+      Scenario                    | Points Change | Timeline
+      Pay Card X to 0%           | +25-35 pts    | 30-45 days
+      Remove Collection Y        | +15-25 pts    | 30-90 days
+      Remove all negatives       | +50-85 pts    | 60-120 days
+  → National percentile ranking (by age bracket)
+  → Score trajectory forecast: 3/6/12/24 month projections with bands
+
+PAGES 11-20: SECTION 3 — COMPLETE ACCOUNT ANALYSIS
+  → Summary table: all accounts at a glance
+  → Per-account deep dive (each account gets full analysis):
+      Account #N: [Creditor Name]
+      ├── Account details table (type, status, dates, balance, limit)
+      ├── Payment history heatmap (24-month grid)
+      ├── Utilization bar (current vs. optimal)
+      ├── Metro 2® compliance audit results
+      ├── FCRA compliance audit results
+      ├── Violation severity: CRITICAL / MAJOR / MINOR
+      ├── Dispute strategy: specific legal basis + action
+      ├── Deletion probability: X% (with confidence interval)
+      └── Score impact if removed: +X points estimated
+  → Positive account recognition (accounts helping score)
+  → Negative account priority matrix (by impact × deletability)
+
+PAGES 21-24: SECTION 4 — NEGATIVE ITEMS ENFORCEMENT STRATEGY
+  → Complete negative items inventory table
+  → Violation matrix by legal category:
+      FCRA Violations | Count | Legal Basis | Action | Timeline
+      Metro 2® Errors | Count | Standard    | Action | Timeline
+      FDCPA Violations| Count | Legal Basis | Action | Timeline
+  → Statute of limitations calculator (per item)
+  → Re-aging detection analysis
+  → Dispute letter preview (first 3 letters shown)
+  → Full dispute package contents list
+  → Expected deletion timeline with probability scoring
+  → CFPB complaint guidance (when to escalate)
+
+PAGES 25-28: SECTION 5 — FINANCIAL HEALTH DEEP DIVE
+  → Financial health radar chart (6 dimensions)
+  → Debt-to-income ratio analysis:
+      Current DTI | Industry Benchmark | Optimal Target | Gap
+  → Credit utilization optimization chart:
+      Per-account utilization bars (color coded: green/yellow/red)
+      Total utilization + optimal paydown amounts
+  → Cash flow waterfall chart (income → obligations → discretionary)
+  → Net worth calculation + 12-month projection
+  → Emergency fund adequacy score
+  → Savings rate analysis vs. recommended benchmarks
+  → Debt payoff comparison:
+      Avalanche method: $X total interest, Y months
+      Snowball method: $X total interest, Y months
+      Recommended: [method] with [reasoning]
+
+PAGES 29-35: SECTION 6 — STRATEGIC OPTIMIZATION PLAN
+  → Phase 1 (Days 1-30): Foundation & Filing
+      □ Day 1-3: Pull all three bureau reports
+      □ Day 4-7: Prepare and send dispute letters (certified mail)
+      □ Day 8-14: File CFPB complaints for critical violations
+      □ Day 15-30: Reduce utilization on [specific accounts]
+      Timeline bar chart for Phase 1
+
+  → Phase 2 (Days 31-60): Enforcement & Pressure
+      □ Day 31: Follow up on all outstanding disputes
+      □ Day 35: Send Method of Verification demands if no response
+      □ Day 40-50: Send furnisher direct disputes (§623 procedure)
+      □ Day 50-60: Review CRA investigation results
+      Timeline bar chart for Phase 2
+
+  → Phase 3 (Days 61-90): Optimization & Acquisition
+      □ Day 61-70: Verify all deletions/updates across bureaus
+      □ Day 70-80: Request credit limit increases (timing analysis)
+      □ Day 80-85: Apply for recommended new products (if score sufficient)
+      □ Day 85-90: Pull final reports, measure all improvements
+      Timeline bar chart for Phase 3
+
+  → Expected outcomes table:
+      Metric                     | Start | 30 Days | 60 Days | 90 Days
+      Credit Score (Estimated)   | XXX   | XXX-XXX | XXX-XXX | XXX-XXX
+      Negative Items             | X     | X       | X       | X
+      Utilization Rate           | XX%   | XX%     | XX%     | XX%
+      Monthly Interest Payments  | $XXX  | $XXX    | $XXX    | $XXX
+
+PAGES 36-40: SECTION 7 — FINANCIAL PRODUCT RECOMMENDATIONS
+  → Current product audit (what you have vs. what you should have)
+  → Recommended product roadmap by credit score milestone:
+      Score 580-619: [specific secured cards + credit builder loans]
+      Score 620-659: [specific unsecured entry cards + auto options]
+      Score 660-699: [specific mid-tier cards + mortgage eligibility]
+      Score 700-739: [specific premium cards + best loan rates]
+      Score 740+:    [premium/elite products + best mortgage rates]
+  → Balance transfer opportunity analysis:
+      Current Card | APR | Transfer Target | New APR | Monthly Savings
+  → Mortgage readiness assessment (FHA / Conventional / VA / USDA paths)
+  → Business credit roadmap (if applicable)
+  → Approval probability table for each recommended product
+
+PAGES 41-44: SECTION 8 — AUTOMATION & MONITORING SYSTEMS
+  → Credit monitoring setup guide (which services to use + why)
+  → Dispute tracking calendar template
+  → Alert configuration guide (score change thresholds)
+  → Automated payment setup recommendations
+  → Credit limit increase request scheduler
+  → Annual credit hygiene checklist
+  → Fraud alert + security freeze guidance
+
+PAGES 45-48: SECTION 9 — RISK ASSESSMENT & MITIGATION
+  → Identity theft risk score
+  → Medical debt exposure analysis (NoSurprises Act guidance)
+  → Predatory lending vulnerability assessment
+  → Debt collection rights cheatsheet
+  → SOL (Statute of Limitations) map by debt type + state
+  → Emergency financial protocols
+
+PAGES 49-52: SECTION 10 — APPENDICES
+  → Appendix A: Legal Framework (FCRA, FDCPA, CFPB resources)
+  → Appendix B: Metro 2® violation definitions reference
+  → Appendix C: Sample dispute letter (abridged)
+  → Appendix D: CRA contact information + mailing addresses
+  → Appendix E: Glossary of credit terms
+  → Appendix F: Rick Jefferson contact + next steps CTA
+
+FINAL PAGE: CTA + CONTACT
+  → "Your Credit Transformation Journey Begins Now"
+  → Next steps to work with Rick Jefferson
+  → Contact: 945-308-8003 | https://linkinbio.rickjefferson.com
+  → RJ Business Solutions branding footer
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5: CREWAI AGENT DEFINITIONS (CrewAI 1.10.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CREWAI_AGENT_DEFINITIONS = """
+from crewai import Agent, Task, Crew, Process
+from crewai.tools import BaseTool
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+
+# Model routing per Agent Architecture in SUPREME META AGI v8.0
+ORCHESTRATOR_LLM = ChatAnthropic(model="claude-opus-4-6")    # Complex reasoning
+WORKER_LLM = ChatAnthropic(model="claude-sonnet-4-6")        # Standard execution
+FAST_LLM = ChatOpenAI(                                        # Cost-optimized
+    base_url="https://openrouter.ai/api/v1",
+    model="google/gemini-flash-2.0"
+)
+
+# ── LAYER 1: DATA ACQUISITION AGENTS ─────────────────────────────────────────
+credit_bureau_parser = Agent(
+    role="Credit Bureau Intelligence Specialist",
+    goal=(
+        "Extract complete, structured data from all three credit bureau reports "
+        "(Equifax, TransUnion, Experian) with 100% accuracy. Identify every "
+        "account, inquiry, public record, and personal information entry. "
+        "Validate all data for completeness and flag confidence level."
+    ),
+    backstory=(
+        "You are a 20-year veteran credit bureau analyst who has processed "
+        "over 100,000 credit reports. You know the exact field structure of "
+        "Metro 2® format, understand how each bureau reports differently, and "
+        "can spot re-aged accounts, mixed files, and data errors instantly."
+    ),
+    llm=WORKER_LLM,
+    tools=[pdf_extraction_tool, metro2_validation_tool, data_normalization_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=3
+)
+
+# ── LAYER 2: FINANCIAL ANALYSIS AGENTS ───────────────────────────────────────
+financial_analyst = Agent(
+    role="Quantitative Credit Financial Analyst",
+    goal=(
+        "Compute 150+ financial health metrics from the client's credit profile. "
+        "Model debt payoff trajectories, calculate DTI ratios, score credit "
+        "utilization optimization opportunities, and generate statistical "
+        "projections for credit score improvements across 3, 6, 12, 24 months."
+    ),
+    backstory=(
+        "You are a CFA-level quantitative analyst specializing in consumer "
+        "credit who has built predictive models for major financial institutions. "
+        "You think in numbers, probabilities, and expected values. Every "
+        "recommendation you make is mathematically defensible."
+    ),
+    llm=WORKER_LLM,
+    tools=[financetoolkit_tool, pandas_analysis_tool, sklearn_modeling_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=5
+)
+
+# ── LAYER 3: LEGAL COMPLIANCE AGENTS ─────────────────────────────────────────
+metro2_compliance_auditor = Agent(
+    role="Metro 2® Compliance Auditor & FCRA Legal Strategist",
+    goal=(
+        "Conduct a thorough Metro 2® Format audit on every account in the "
+        "credit profile. Identify all FCRA §607(b), §611(a), §623(a), §605(a) "
+        "violations. Score each violation by severity and dispute success "
+        "probability. Generate legally precise dispute strategies citing "
+        "specific code sections."
+    ),
+    backstory=(
+        "You are a consumer protection attorney with 15 years specializing in "
+        "FCRA litigation. You have filed 500+ successful lawsuits against CRAs "
+        "and furnishers. You know Metro 2® format specification cold, understand "
+        "exactly what constitutes a 'reasonable procedure' under FCRA, and can "
+        "build an airtight dispute case from a single field error."
+    ),
+    llm=ORCHESTRATOR_LLM,
+    tools=[metro2_spec_tool, fcra_law_tool, fdcpa_law_tool, violation_scorer_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=5
+)
+
+dispute_letter_generator = Agent(
+    role="Professional Dispute Letter Writer & Legal Document Specialist",
+    goal=(
+        "Generate professional, legally precise dispute letters for every "
+        "identified violation. Each letter must cite specific FCRA/FDCPA "
+        "sections, describe the exact violation, demand specific remedies, "
+        "and set clear response deadlines. Letters must be bureau-specific "
+        "and optimized for maximum compliance from CRAs and furnishers."
+    ),
+    backstory=(
+        "You are the foremost credit dispute letter specialist in the country, "
+        "having written over 50,000 dispute letters with a 78% deletion rate. "
+        "You write with legal precision and psychological authority. Every "
+        "letter you produce is a legally defensible document that demands "
+        "action."
+    ),
+    llm=WORKER_LLM,
+    tools=[letter_template_tool, legal_citation_tool, pdf_generation_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=3
+)
+
+# ── LAYER 4: PATTERN & PREDICTION AGENTS ─────────────────────────────────────
+pattern_analyzer = Agent(
+    role="Behavioral Credit Pattern Recognition Specialist",
+    goal=(
+        "Identify behavioral patterns in 24+ months of payment history, "
+        "spending data, and credit utilization trends. Build a financial "
+        "personality profile. Predict which strategies will work best given "
+        "the client's demonstrated behavior patterns. Calculate success "
+        "probabilities for all recommended actions."
+    ),
+    backstory=(
+        "You combine the analytical rigor of a data scientist with the "
+        "psychological insight of a behavioral economist. You see patterns "
+        "others miss — the seasonal debt cycles, the stress-spending triggers, "
+        "the creditor behavior patterns — and you use these insights to build "
+        "strategies that actually work for real humans, not just spreadsheet "
+        "models."
+    ),
+    llm=WORKER_LLM,
+    tools=[ml_pattern_tool, psychology_profiling_tool, probability_modeling_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=4
+)
+
+# ── LAYER 5: STRATEGY SYNTHESIS AGENT ────────────────────────────────────────
+strategy_synthesizer = Agent(
+    role="Supreme Credit Strategy Architect",
+    goal=(
+        "Synthesize all analysis from all previous agents into a coherent, "
+        "prioritized, personalized credit transformation strategy. Every "
+        "recommendation must be ranked by expected score impact and timeline, "
+        "tailored to the client's behavioral profile, and assembled into a "
+        "clear 90-day action plan with day-specific tasks."
+    ),
+    backstory=(
+        "You are Rick Jefferson's digital twin — the Supreme Credit Master "
+        "with quantum-level thinking. You see the complete chess board: legal "
+        "violations, financial opportunities, behavioral patterns, and product "
+        "roadmaps. You synthesize everything into strategies that feel "
+        "personalized because they ARE personalized — to this exact human's "
+        "exact situation."
+    ),
+    llm=ORCHESTRATOR_LLM,
+    tools=[strategy_synthesis_tool, action_plan_generator, priority_ranker],
+    verbose=True,
+    allow_delegation=True,
+    max_iterations=5
+)
+
+# ── LAYER 7: VISUALIZATION AGENT ─────────────────────────────────────────────
+visualization_specialist = Agent(
+    role="Financial Data Visualization Engineer",
+    goal=(
+        "Generate 12+ publication-quality charts that visually communicate "
+        "all key findings from the credit analysis. Charts must use Rick "
+        "Jefferson's brand colors, be at 300 DPI minimum, and be optimized "
+        "for professional PDF embedding. Every chart should tell a story "
+        "that's immediately understood."
+    ),
+    backstory=(
+        "You are a data visualization expert who has created charts for "
+        "Goldman Sachs annual reports and Federal Reserve publications. "
+        "You believe data visualization is communication art — the right "
+        "chart makes complex financial data instantly understandable to "
+        "anyone."
+    ),
+    llm=WORKER_LLM,
+    tools=[matplotlib_tool, seaborn_tool, plotly_tool, kaleido_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=3
+)
+
+# ── LAYER 8: REPORT GENERATION AGENT ─────────────────────────────────────────
+report_master = Agent(
+    role="Elite Financial Report Production Director",
+    goal=(
+        "Assemble all analysis, charts, tables, and recommendations into a "
+        "30-50 page publication-quality PDF report using ReportLab (primary) "
+        "and WeasyPrint (secondary). The final report must rival premium "
+        "financial consulting deliverables, be fully branded with Rick "
+        "Jefferson's identity, and be immediately ready for client delivery."
+    ),
+    backstory=(
+        "You have produced financial reports for BlackRock, Vanguard, and "
+        "top-tier credit counseling firms. You are obsessed with quality — "
+        "typography, spacing, color, data presentation. You don't produce "
+        "reports, you produce experiences. Clients who receive your reports "
+        "feel like they've received a luxury product."
+    ),
+    llm=WORKER_LLM,
+    tools=[reportlab_tool, weasyprint_tool, jinja2_tool, pdf_assembler_tool],
+    verbose=True,
+    allow_delegation=False,
+    max_iterations=4
+)
+
+# ── CREW ORCHESTRATION ────────────────────────────────────────────────────────
+hyperion_crew = Crew(
+    agents=[
+        credit_bureau_parser,
+        financial_analyst,
+        metro2_compliance_auditor,
+        dispute_letter_generator,
+        pattern_analyzer,
+        strategy_synthesizer,
+        visualization_specialist,
+        report_master
+    ],
+    tasks=[
+        parse_credit_data_task,
+        analyze_financial_health_task,
+        audit_metro2_compliance_task,
+        generate_dispute_letters_task,
+        analyze_patterns_task,
+        synthesize_strategy_task,
+        generate_visualizations_task,
+        generate_report_task
+    ],
+    process=Process.hierarchical,   # StrategySynthesizer as orchestrator
+    manager_llm=ORCHESTRATOR_LLM,
+    verbose=2,
+    memory=True,                    # Cross-agent memory for context continuity
+    embedder={
+        "provider": "openai",
+        "config": {"model": "text-embedding-3-small"}
+    }
+)
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 6: FASTAPI ROUTE DEFINITIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+FASTAPI_ROUTES = """
+# apps/ai/routes/hyperion.py
+from fastapi import APIRouter, UploadFile, File, Depends, BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from typing import Optional
+import uuid
+
+router = APIRouter(prefix="/hyperion", tags=["Hyperion Credit Nexus"])
+
+# ── REQUEST/RESPONSE SCHEMAS ──────────────────────────────────────────────────
+class CreditAnalysisRequest(BaseModel):
+    client_id:          Optional[str]   = Field(None, description="Existing client ID")
+    client_name:        str             = Field(..., min_length=2, max_length=255)
+    client_email:       str             = Field(..., pattern=r'^[^@]+@[^@]+\.[^@]+$')
+    client_phone:       Optional[str]   = None
+    annual_income:      Optional[float] = Field(None, ge=0)
+    monthly_expenses:   Optional[float] = Field(None, ge=0)
+    goals:              Optional[dict]  = None
+    report_type:        str             = Field("full", pattern=r'^(full|summary|dispute_only)$')
+    priority_focus:     Optional[str]   = Field(None, description="score_boost|debt_reduction|mortgage_prep")
+
+class CreditAnalysisResponse(BaseModel):
+    job_id:             str
+    client_id:          str
+    status:             str
+    estimated_minutes:  int
+    webhook_url:        Optional[str]   = None
+
+class ReportStatusResponse(BaseModel):
+    job_id:             str
+    status:             str             # queued|processing|complete|failed
+    progress_pct:       int
+    current_layer:      Optional[str]   = None
+    report_url:         Optional[str]   = None
+    dispute_package_url: Optional[str]  = None
+    error_message:      Optional[str]   = None
+
+# ── ROUTES ────────────────────────────────────────────────────────────────────
+@router.post("/analyze",
+    response_model=CreditAnalysisResponse,
+    summary="Submit credit report files for full analysis",
+    description="Upload 1-3 bureau credit reports (PDF/HTML/JSON). Returns job ID for async processing."
+)
+async def analyze_credit(
+    request_data: CreditAnalysisRequest,
+    equifax_file:    Optional[UploadFile] = File(None),
+    transunion_file: Optional[UploadFile] = File(None),
+    experian_file:   Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: dict = Depends(verify_jwt_token)
+):
+    """
+    Accepts credit bureau report files, enqueues Hyperion crew analysis,
+    returns job ID for polling. Uses Celery for async processing.
+    """
+    if not any([equifax_file, transunion_file, experian_file]):
+        raise HTTPException(status_code=422, detail="At least one bureau file required")
+
+    job_id = str(uuid.uuid4())
+    client_id = request_data.client_id or str(uuid.uuid4())
+
+    # Enqueue to Celery
+    background_tasks.add_task(
+        run_hyperion_analysis,
+        job_id=job_id,
+        client_id=client_id,
+        request_data=request_data.model_dump(),
+        files={
+            "equifax": equifax_file,
+            "transunion": transunion_file,
+            "experian": experian_file
+        }
+    )
+
+    return CreditAnalysisResponse(
+        job_id=job_id,
+        client_id=client_id,
+        status="queued",
+        estimated_minutes=8
+    )
+
+@router.get("/status/{job_id}",
+    response_model=ReportStatusResponse,
+    summary="Poll analysis job status"
+)
+async def get_analysis_status(
+    job_id: str,
+    current_user: dict = Depends(verify_jwt_token)
+):
+    status = await get_job_status(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return ReportStatusResponse(**status)
+
+@router.get("/report/{report_id}",
+    summary="Download generated PDF report",
+    response_class=FileResponse
+)
+async def download_report(
+    report_id: str,
+    current_user: dict = Depends(verify_jwt_token)
+):
+    report = await get_report_by_id(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return FileResponse(
+        path=report.file_path,
+        media_type="application/pdf",
+        filename=f"credit_analysis_{report.client_id}.pdf"
+    )
+
+@router.post("/quick-score",
+    summary="Instant credit health score from raw data (no file upload)"
+)
+async def quick_score(
+    credit_score: int = Field(..., ge=300, le=850),
+    utilization_pct: float = Field(..., ge=0, le=100),
+    negative_items: int = Field(..., ge=0),
+    on_time_pct: float = Field(..., ge=0, le=100),
+    account_age_months: int = Field(..., ge=0),
+    current_user: dict = Depends(verify_jwt_token)
+):
+    \"\"\"Instant financial health score without full analysis pipeline.\"\"\"
+    score = calculate_quick_health_score(
+        credit_score, utilization_pct, negative_items,
+        on_time_pct, account_age_months
+    )
+    return {
+        "health_score": score.overall,
+        "grade": score.grade,
+        "top_improvement_action": score.top_action,
+        "estimated_score_potential": score.score_potential,
+        "recommended_next_step": score.next_step
+    }
+
+@router.get("/health", summary="API health check")
+async def health_check():
+    return {"status": "operational", "version": "2026.04", "agents": "online"}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 7: BRAND COLORS + VISUALIZATION CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VISUALIZATION_CONFIG = """
+# Rick Jefferson Brand System — April 2026
+BRAND = {
+    'colors': {
+        'primary_blue':    '#003D91',    # Deep royal blue — primary identity
+        'royal_blue':      '#1455D1',    # Medium blue — headers, accents
+        'light_blue':      '#4A90E2',    # Light blue — secondary elements
+        'pale_blue':       '#E8F4F8',    # Background tint
+        'accent_gold':     '#FFD700',    # Gold — premium highlights
+        'white':           '#FFFFFF',
+        'slate_gray':      '#2F3E4D',    # Body text
+        'light_gray':      '#F8F9FA',    # Table alternating rows
+        'success_green':   '#28A745',    # Good metrics (util < 30%, on-time)
+        'warning_orange':  '#FFA500',    # Caution metrics
+        'danger_red':      '#DC3545',    # Critical metrics, violations
+        'dark_bg':         '#0E1C2F',    # Dark mode background
+        'grid_overlay':    '#0E1C2F'
+    },
+    'typography': {
+        'heading_font':    'Helvetica-Bold',
+        'body_font':       'Helvetica',
+        'mono_font':       'Courier',
+        'heading_size':    24,
+        'subheading_size': 16,
+        'section_size':    13,
+        'body_size':       11,
+        'caption_size':    9
+    },
+    'identity': {
+        'company':         'RJ Business Solutions',
+        'founder':         'Rick Jefferson',
+        'title':           'Supreme Credit Master • Tax-Tech Authority',
+        'website':         'https://linkinbio.rickjefferson.com',
+        'phone':           '945-308-8003',
+        'address':         '1342 NM 333, Tijeras, New Mexico 87059',
+        'email':           'support@rjbusinesssolutions.org',
+        'logo_url':        'https://storage.googleapis.com/msgsndr/qQnxRHDtyx0uydPd5sRl/media/67eb83c5e519ed689430646b.jpeg',
+        'tagline':         '"Your credit score doesn\'t define you—but we can help you redefine it."'
+    },
+    'report': {
+        'dpi':             300,
+        'page_size':       'letter',
+        'left_margin':     0.75,         # inches
+        'right_margin':    0.75,
+        'top_margin':      1.0,
+        'bottom_margin':   0.75,
+        'target_pages':    '30-50'
+    }
+}
+
+# Credit Score Color Zones
+SCORE_ZONES = [
+    {'range': (300, 579), 'color': '#DC3545', 'label': 'Poor',       'action': 'CRITICAL — Immediate action required'},
+    {'range': (580, 669), 'color': '#FFA500', 'label': 'Fair',       'action': 'HIGH PRIORITY — Significant improvement needed'},
+    {'range': (670, 739), 'color': '#FFC107', 'label': 'Good',       'action': 'MODERATE — Optimization opportunities available'},
+    {'range': (740, 799), 'color': '#28A745', 'label': 'Very Good',  'action': 'LOW — Fine-tune for premium products'},
+    {'range': (800, 850), 'color': '#003D91', 'label': 'Exceptional','action': 'MAINTAIN — You\'ve achieved credit mastery'}
+]
+
+# Chart Library for Each Use Case
+CHART_ASSIGNMENT = {
+    'credit_score_gauge':       'matplotlib (polar) — static, PDF-optimized',
+    'payment_history_heatmap':  'seaborn — statistical heatmap, 24-month grid',
+    'utilization_bars':         'matplotlib (barh) — per-account horizontal bars',
+    'debt_payoff_projection':   'matplotlib (fill_between) — area chart with bands',
+    'score_trajectory':         'matplotlib (plot) — multi-line with scenario bands',
+    'financial_health_radar':   'matplotlib (polar) — 6-factor radar chart',
+    'account_age_timeline':     'matplotlib (barh) — Gantt-style horizontal',
+    'inquiry_impact':           'matplotlib (bar) — declining bar chart',
+    'account_mix_donut':        'matplotlib (pie) — donut with legend',
+    'dti_gauge':                'matplotlib (polar) — speedometer style',
+    'cash_flow_waterfall':      'plotly (waterfall) — exported via kaleido',
+    'debt_sunburst':            'plotly (sunburst) — exported via kaleido'
+}
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 8: AGENT CONVERSATION TRIGGERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CONVERSATION_TRIGGERS = """
+When a user interacts with HYPERION, these phrases trigger specific workflows:
+
+FULL REPORT GENERATION:
+  → "Generate my comprehensive credit report"
+  → "Create a full credit analysis report"
+  → "I want the elite 30-50 page report"
+  → "Run a complete credit analysis"
+  → "Generate everything"
+  RESPONSE: Activate all 8 layers, full CrewAI pipeline
+
+QUICK HEALTH SCORE:
+  → "What's my credit health score?"
+  → "Give me a quick credit score check"
+  → "How healthy is my credit?"
+  RESPONSE: Activate Layer 2 only, return health score + top 3 actions
+
+DISPUTE PACKAGE ONLY:
+  → "Generate dispute letters"
+  → "Find violations in my report"
+  → "Create my dispute package"
+  RESPONSE: Activate Layers 1, 3 only — generate dispute package
+
+STRATEGY CONSULTATION:
+  → "What should I do first?"
+  → "How do I improve my score by [X] points?"
+  → "What's the fastest way to get to [score]?"
+  RESPONSE: Activate Layers 2, 4, 5 — return strategy without full report
+
+PRODUCT RECOMMENDATION:
+  → "What credit cards should I apply for?"
+  → "Am I ready for a mortgage?"
+  → "What's the best debt consolidation option?"
+  RESPONSE: Activate Layer 6 — return product match matrix
+
+90-DAY PLAN:
+  → "Give me a 90-day plan"
+  → "What do I do in the next 90 days?"
+  RESPONSE: Activate Layers 5, action plan generation
+
+LEGAL QUESTION:
+  → "Can they legally do that?"
+  → "Is this a FCRA violation?"
+  → "What are my rights?"
+  RESPONSE: Activate Layer 3 agents — legal analysis only
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 9: ANTI-PATTERNS & QUALITY GATES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+QUALITY_GATES = """
+HYPERION NEVER:
+  ✗ Cites FCRA/FDCPA sections it hasn't verified (hallucination = liability)
+  ✗ Promises specific score increases (use ranges with confidence intervals)
+  ✗ Provides legal advice as legal counsel (provide information, not counsel)
+  ✗ Stores SSNs, full account numbers, or other PII unencrypted
+  ✗ Generates dispute letters without specific legal grounds
+  ✗ Uses hardcoded credentials, API keys, or secrets
+  ✗ Produces reports under 20 pages (minimum quality standard)
+  ✗ Skips the MetrO 2® compliance audit for any account
+  ✗ Uses npm, yarn, global pip, or cmd/PowerShell on macOS
+  ✗ Makes statistical claims without showing confidence intervals
+
+HYPERION ALWAYS:
+  ✅ Cites specific FCRA/FDCPA sections with accuracy
+  ✅ Uses probability ranges (e.g., "50-80% deletion probability")
+  ✅ Includes confidence intervals on all score projections
+  ✅ Encrypts all PII at rest using AES-256
+  ✅ Validates all Pydantic models before processing
+  ✅ Logs all agent actions via structlog (structured JSON)
+  ✅ Runs pydantic v2 validation on every data schema
+  ✅ Provides source citations for all legal references
+  ✅ Generates reports with RJ Business Solutions branding
+  ✅ Includes disclaimer: "This is educational information, not legal advice"
+
+LEGAL DISCLAIMER (include on every report):
+  "This report is provided for educational and informational purposes only.
+   It does not constitute legal, financial, or credit counseling advice.
+   Rick Jefferson and RJ Business Solutions are not attorneys. For legal
+   advice regarding FCRA or FDCPA matters, consult a licensed consumer
+   protection attorney. Credit score improvements are not guaranteed.
+   Individual results vary based on credit history and actions taken."
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10: SYSTEM INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_INIT = """
+HYPERION QUANTUM CREDIT NEXUS — SYSTEM STATUS
+═══════════════════════════════════════════════
+  Version:          2026.04
+  Build Date:       April 9, 2026
+  Python:           3.13.2
+  FastAPI:          0.135.1
+  CrewAI:           1.10.1
+  LangGraph:        0.3.21
+  ReportLab:        4.3.1
+  Agent Layers:     8 ACTIVE
+  Report Capacity:  30-50 pages
+  Charts Engine:    12 chart types
+  Legal Engine:     FCRA + FDCPA + Metro 2®
+  Brand:            RJ Business Solutions ✅
+  Status:           ✅ FULLY OPERATIONAL
+
+READY TO TRANSFORM FINANCIAL LIVES. LET'S GO. 🚀
+"""
