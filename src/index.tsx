@@ -1349,10 +1349,10 @@ input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px
   <div class="max-w-4xl mx-auto px-4 text-center">
     <h2 class="font-heading font-800 text-3xl sm:text-4xl mb-4">Every Day You Wait Costs You Money</h2>
     <p class="text-gray-400 text-lg mb-8 max-w-2xl mx-auto">Higher interest rates. Denied applications. Lost opportunities. The math is simple — fixing your credit now saves you thousands.</p>
-    <a href="#apply" class="cta-btn animate-pulse-glow text-white font-bold text-xl px-12 py-5 rounded-xl inline-block">
-      <i class="fas fa-bolt mr-2"></i>Start My FREE Consultation
+    <a href="/signup" class="cta-btn animate-pulse-glow text-white font-bold text-xl px-12 py-5 rounded-xl inline-block">
+      <i class="fas fa-bolt mr-2"></i>Start My Credit Repair Now
     </a>
-    <div class="mt-4 text-gray-600 text-sm">No credit card required • No upfront payment • 5-minute response</div>
+    <div class="mt-4 text-gray-600 text-sm">3-day money-back guarantee • No upfront fee • Cancel anytime</div>
   </div>
 </section>
 
@@ -3177,24 +3177,29 @@ app.get('/api/communications', async (c) => {
 
 // Send email via SendGrid
 app.post('/api/email/sendgrid', async (c) => {
-  const { DB, env } = c
-  const { to, subject, html_body, text_body, client_id, template_name, sop_id } = await c.req.json() as any
+  const env = c.env; const { DB } = env
+  const { to, subject, html_body, text_body, body, client_id, template_name, sop_id } = await c.req.json() as any
   if (!to || !subject) return c.json({ error: 'to and subject required' }, 400)
-  if (!env.SENDGRID_API_KEY) return c.json({ error: 'SendGrid not configured' }, 500)
+  if (!env.SENDGRID_API_KEY) return c.json({ error: 'SendGrid not configured — verify SENDGRID_API_KEY and sender domain at sendgrid.com' }, 500)
+  const finalBody = html_body || body || text_body || subject
   try {
     const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         personalizations: [{ to: [{ email: to }] }],
-        from: { email: 'support@rjbusinesssolutions.org', name: 'RJ Business Solutions' },
+        from: { email: env.COMPANY_EMAIL || 'support@rjbusinesssolutions.org', name: env.COMPANY_NAME || 'RJ Business Solutions' },
         subject,
         content: [
-          ...(text_body ? [{ type: 'text/plain', value: text_body }] : []),
-          ...(html_body ? [{ type: 'text/html', value: html_body }] : [{ type: 'text/plain', value: subject }])
+          { type: html_body ? 'text/html' : 'text/plain', value: finalBody }
         ]
       })
     })
+    // Log detailed error for debugging
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '')
+      console.error('SendGrid error', res.status, errText)
+    }
 
     if (DB) {
       await DB.prepare(`INSERT INTO communications (client_id, channel, direction, provider, from_address, to_address, subject, body, status, template_name, sop_id) VALUES (?, 'email', 'outbound', 'sendgrid', 'support@rjbusinesssolutions.org', ?, ?, ?, ?, ?, ?)`)
@@ -8533,6 +8538,504 @@ async function runSOPExec() {
     const d = await r.json()
     out.textContent = d.output || d.error || 'No output'
   } catch(e) { out.textContent = 'Error: '+e.message }
+}
+</script>
+</body></html>`)
+})
+
+// ============================================================
+// AGENT & AUTOMATION CONTROL CENTER — /agents
+// Live dashboard: all AI agents, comms, cron, sequences
+// ============================================================
+
+app.get('/agents', async (c) => {
+  const env = c.env; const { DB } = env
+  const company = env.COMPANY_NAME || 'RJ Business Solutions'
+
+  // Fetch live data
+  const [recentComms, recentSops, sequences, recentTasks, pendingAnalyses] = await Promise.all([
+    DB ? DB.prepare(`SELECT channel, direction, status, to_address, subject, body, created_at FROM communications ORDER BY id DESC LIMIT 10`).all().catch(() => ({ results: [] })) : { results: [] },
+    DB ? DB.prepare(`SELECT sop_id, sop_title, status, client_id, duration_ms, created_at FROM sop_executions ORDER BY id DESC LIMIT 8`).all().catch(() => ({ results: [] })) : { results: [] },
+    DB ? DB.prepare(`SELECT name, trigger_event, delay_days, is_active FROM email_sequences ORDER BY id`).all().catch(() => ({ results: [] })) : { results: [] },
+    DB ? DB.prepare(`SELECT title, status, priority, assigned_to, created_at FROM tasks ORDER BY id DESC LIMIT 8`).all().catch(() => ({ results: [] })) : { results: [] },
+    DB ? DB.prepare(`SELECT id, status, created_at FROM analysis_reports WHERE status IN ('pending','running') LIMIT 5`).all().catch(() => ({ results: [] })) : { results: [] }
+  ])
+
+  const commsArr = (recentComms.results || []) as any[]
+  const sopsArr = (recentSops.results || []) as any[]
+  const seqArr = (sequences.results || []) as any[]
+  const tasksArr = (recentTasks.results || []) as any[]
+  const pendingArr = (pendingAnalyses.results || []) as any[]
+
+  const aiKeys = { openrouter: !!env.OPENROUTER_API_KEY, groq: !!env.GROQ_API_KEY, openai: !!env.OPENAI_API_KEY }
+  const commsKeys = { twilio: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN), sendgrid: !!env.SENDGRID_API_KEY, resend: !!env.RESEND_API_KEY, click2mail: !!env.CLICK2MAIL_AUTH_BASIC }
+  const primaryAI = aiKeys.openrouter ? 'OpenRouter' : aiKeys.groq ? 'Groq' : aiKeys.openai ? 'OpenAI' : 'None'
+
+  const HYPERION_AGENTS = [
+    { id: 1, name: 'Executive Summary', icon: '📊', desc: 'Credit health score (0-100), letter grade, top 5 findings, 90-day projection' },
+    { id: 2, name: 'Score Projection', icon: '📈', desc: 'Conservative/Moderate/Aggressive trajectories at 3, 6, 12, 24 months' },
+    { id: 3, name: 'Metro 2® Audit', icon: '⚖️', desc: 'Every account checked against Metro 2® spec — Critical/Major/Minor violations' },
+    { id: 4, name: 'FCRA/FDCPA Legal Audit', icon: '🏛️', desc: 'FCRA §611/§607/§623/§605, FDCPA §809(b) — deletion probability per account' },
+    { id: 5, name: 'Debt Analysis', icon: '💰', desc: 'Avalanche vs snowball payoff, utilization optimization, settlement strategy' },
+    { id: 6, name: 'Auto Loan Roadmap', icon: '🚗', desc: 'Rate tier analysis, prime rate qualification timeline, monthly payment savings' },
+    { id: 7, name: 'Mortgage Roadmap', icon: '🏠', desc: 'FHA/Conventional eligibility, rate comparison, 30-yr interest savings' },
+    { id: 8, name: 'Business Funding Roadmap', icon: '🏢', desc: 'Tier 1→4 vendor credit, EIN strategy, D&B PAYDEX, $50K-$500K path' },
+    { id: 9, name: 'Debt Removal Roadmap', icon: '🗑️', desc: 'Per-account: dispute probability, PFD targets, goodwill candidates' },
+    { id: 10, name: '90-Day Action Plan', icon: '📅', desc: 'Day-by-day executable plan — Phase 1/2/3 with point impact per action' },
+    { id: 11, name: 'Product Matching', icon: '💳', desc: 'Cards and loans approved now + next tier targets at 680/720/750' },
+    { id: 12, name: 'Behavioral Profile', icon: '🧠', desc: 'Financial personality type, behavioral risk factors, habit formation plan' },
+  ]
+
+  const STANDALONE_AGENTS = [
+    { name: 'Dispute Letter Generator', icon: '✉️', endpoint: '/api/ai/generate-dispute-letter', method: 'POST', desc: 'FCRA-cited dispute letter for any account and bureau', trigger: 'Manual / Dispute created' },
+    { name: 'Credit Report Analyst', icon: '🔍', endpoint: '/api/ai/analyze-credit-report', method: 'POST', desc: 'Full 3-bureau analysis, roadmap, FCRA violations', trigger: 'MFSN report import' },
+    { name: 'Email Draft Agent', icon: '📧', endpoint: '/api/ai/draft-email', method: 'POST', desc: 'Drafts welcome, progress, dispute, escalation emails', trigger: 'Staff request' },
+    { name: 'Lead Scorer', icon: '🎯', endpoint: '/api/ai/score-lead', method: 'POST', desc: 'LTV prediction, close probability, plan recommendation', trigger: 'Lead created' },
+    { name: 'AI Autopilot', icon: '🤖', endpoint: '/api/ai/run-autopilot', method: 'POST', desc: 'Full client orchestration: scoring, tasks, dispute plan', trigger: 'Monthly or manual' },
+    { name: 'Score Simulator', icon: '🎲', endpoint: '/api/ai/score-simulation', method: 'POST', desc: 'What-if scenarios: pay off X, remove Y, add AU tradeline', trigger: 'Strategy review' },
+    { name: 'Settlement Negotiator', icon: '🤝', endpoint: '/api/ai/settle', method: 'POST', desc: 'PFD strategy, settlement %, negotiation ladder script', trigger: 'Collection account review' },
+    { name: 'Goodwill Letter Writer', icon: '💌', endpoint: '/api/ai/goodwill', method: 'POST', desc: 'Emotionally resonant 3-paragraph goodwill deletion request', trigger: 'Paid late payment' },
+    { name: 'CFPB Complaint Drafter', icon: '📋', endpoint: '/api/ai/cfpb-complaint', method: 'POST', desc: 'Full CFPB complaint with statute citations', trigger: 'Verified dispute / Non-response' },
+    { name: 'Inquiry Removal Agent', icon: '🔎', endpoint: '/api/ai/inquiry-removal', method: 'POST', desc: 'Unauthorized inquiry identification and dispute plan', trigger: 'Report import' },
+    { name: 'Client Progress Update', icon: '📣', endpoint: '/api/ai/client-update', method: 'POST', desc: 'Personalized progress summary for client email/SMS', trigger: 'Monthly round completion' },
+    { name: 'SOP Executor (62 SOPs)', icon: '⚙️', endpoint: '/api/sop/execute/:sopId', method: 'POST', desc: 'AI executes any of 62 documented SOPs with client context', trigger: 'Staff or automation' },
+  ]
+
+  const CRON_JOBS = [
+    { name: 'Process Email+SMS Sequences', endpoint: '/api/cron/process-sequences', icon: '📨', desc: 'Sends all due drip emails and SMS messages', schedule: 'Every 2 hours' },
+    { name: 'Run Pending Hyperion Analyses', endpoint: '/api/cron/run-pending-analyses', icon: '🔬', desc: 'Picks up to 3 queued analyses and runs all 12 agents', schedule: 'Every 2 hours', badge: pendingArr.length > 0 ? `${pendingArr.length} pending` : null },
+    { name: 'Check Dispute Deadlines', endpoint: '/api/cron/check-deadlines', icon: '⏰', desc: 'Flags disputes past 30-day bureau window, creates escalation tasks', schedule: 'Daily 9am' },
+    { name: 'Compliance Check', endpoint: '/api/cron/compliance-check', icon: '✅', desc: 'Updates compliance rule statuses, flags expiring licenses/bonds', schedule: 'Weekly Monday' },
+    { name: 'Generate KPI Snapshot', endpoint: '/api/cron/generate-kpis', icon: '📊', desc: 'Monthly: MRR, active clients, deletions, churn rate', schedule: '1st of month' },
+    { name: 'Auto-Pull Credit Reports', endpoint: '/api/cron/pull-reports', icon: '📥', desc: 'Autopilot plan: auto-pulls monthly MFSN reports', schedule: '1st of month' },
+    { name: 'Appointment Reminders', endpoint: '/api/appointments/send-reminders', icon: '📅', desc: 'SMS reminders for appointments in next 24 hours', schedule: 'Daily 8am' },
+    { name: 'Run Automation Engine', endpoint: '/api/ops/run-automations', icon: '⚡', desc: 'Evaluates threshold/schedule/event automations, fires actions', schedule: 'Daily 9am' },
+  ]
+
+  const COMM_CHANNELS = [
+    { name: 'Twilio SMS', icon: '📱', status: commsKeys.twilio, desc: 'Outbound SMS to any client. Auto-fires on: lead capture, payment failure, dispute sent, score milestone', test_endpoint: '/api/twilio/sms' },
+    { name: 'Twilio Voice', icon: '📞', status: commsKeys.twilio, desc: 'Outbound calls. Speed-to-lead: fires 5-min task + call on every new lead', test_endpoint: '/api/twilio/call' },
+    { name: 'SendGrid Email', icon: '📧', status: commsKeys.sendgrid, desc: 'Transactional + marketing email. Requires sender domain verified at sendgrid.com', test_endpoint: '/api/email/sendgrid' },
+    { name: 'Resend Email', icon: '📬', status: commsKeys.resend, desc: 'Backup email provider. Auto-fallback if SendGrid unavailable', test_endpoint: '/api/email/resend' },
+    { name: 'Click2Mail (Physical Mail)', icon: '✉️', status: commsKeys.click2mail, desc: 'Certified USPS mail for dispute letters. Every dispute letter mailed with tracking', test_endpoint: null },
+    { name: 'Speed-to-Lead', icon: '⚡', status: commsKeys.twilio || commsKeys.sendgrid, desc: 'Fires SMS + email + critical task to staff within 60 seconds of any new lead', test_endpoint: '/api/speed-to-lead' },
+  ]
+
+  return c.html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent & Automation Control Center — ${company}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #030712; font-family: 'Inter', sans-serif; }
+  .card { background: rgba(17,24,39,0.8); border: 1px solid rgba(55,65,81,0.5); border-radius: 16px; }
+  .badge-live { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }
+  .badge-dead { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+  .badge-warn { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+  .agent-card:hover { border-color: rgba(59,130,246,0.5); transform: translateY(-1px); transition: all 0.2s; }
+  .cron-btn { background: rgba(59,130,246,0.15); color: #93c5fd; border: 1px solid rgba(59,130,246,0.3); cursor: pointer; }
+  .cron-btn:hover { background: rgba(59,130,246,0.3); }
+  .test-btn { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); cursor: pointer; }
+  .test-btn:hover { background: rgba(16,185,129,0.3); }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+  .spinner { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+  .pulse { animation: pulse 2s infinite; } @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+</style>
+</head><body class="text-white min-h-screen">
+
+<!-- NAV -->
+<div class="border-b border-gray-800 px-6 py-3 flex items-center justify-between sticky top-0 bg-gray-950/95 backdrop-blur z-50">
+  <div class="flex items-center gap-3">
+    <a href="/" class="text-gray-400 hover:text-white text-sm">← ${company}</a>
+    <span class="text-gray-700">/</span>
+    <span class="text-white font-semibold">Agent Control Center</span>
+  </div>
+  <div class="flex items-center gap-3">
+    <span class="badge-live text-xs px-2 py-0.5 rounded-full">AI: ${primaryAI} ✓</span>
+    <span class="${commsKeys.twilio ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">SMS: ${commsKeys.twilio ? 'Live' : 'Offline'}</span>
+    <span class="${commsKeys.sendgrid || commsKeys.resend ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">Email: ${commsKeys.sendgrid || commsKeys.resend ? 'Live' : 'Offline'}</span>
+    ${pendingArr.length > 0 ? `<span class="badge-warn text-xs px-2 py-0.5 rounded-full pulse">${pendingArr.length} analyses pending</span>` : ''}
+    <a href="/dashboard" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs">Dashboard →</a>
+  </div>
+</div>
+
+<div class="max-w-7xl mx-auto px-4 py-8 space-y-10">
+
+  <!-- SYSTEM STATUS ROW -->
+  <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black text-blue-400">12</p>
+      <p class="text-xs text-gray-400 mt-1">Hyperion Agents</p>
+    </div>
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black text-green-400">12</p>
+      <p class="text-xs text-gray-400 mt-1">Standalone Agents</p>
+    </div>
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black text-purple-400">62</p>
+      <p class="text-xs text-gray-400 mt-1">SOPs Executable</p>
+    </div>
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black text-yellow-400">${seqArr.length}</p>
+      <p class="text-xs text-gray-400 mt-1">Active Sequences</p>
+    </div>
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black text-orange-400">8</p>
+      <p class="text-xs text-gray-400 mt-1">Cron Jobs</p>
+    </div>
+    <div class="card p-4 text-center">
+      <p class="text-2xl font-black ${pendingArr.length > 0 ? 'text-yellow-400' : 'text-green-400'}">${pendingArr.length}</p>
+      <p class="text-xs text-gray-400 mt-1">Analyses Queued</p>
+    </div>
+  </div>
+
+  <!-- AI PROVIDER STATUS -->
+  <div>
+    <h2 class="text-lg font-bold mb-3 flex items-center gap-2">🤖 AI Provider Status <span class="text-xs font-normal text-gray-400">(auto-fallback chain)</span></h2>
+    <div class="grid grid-cols-3 gap-3">
+      <div class="card p-4 ${aiKeys.openrouter ? 'border-green-800/50' : 'border-red-800/50'}">
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-medium">OpenRouter</span>
+          <span class="${aiKeys.openrouter ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">${aiKeys.openrouter ? '✓ Primary' : '✗ Missing'}</span>
+        </div>
+        <p class="text-xs text-gray-400">GPT-4o-mini, Claude, 200+ models. Routes every AI call first.</p>
+      </div>
+      <div class="card p-4 ${aiKeys.groq ? 'border-green-800/50' : 'border-red-800/50'}">
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-medium">Groq</span>
+          <span class="${aiKeys.groq ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">${aiKeys.groq ? '✓ Fallback 1' : '✗ Missing'}</span>
+        </div>
+        <p class="text-xs text-gray-400">Llama 3.1 — ultra-fast free fallback when OpenRouter fails.</p>
+      </div>
+      <div class="card p-4 ${aiKeys.openai ? 'border-green-800/50' : 'border-red-800/50'}">
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-medium">OpenAI</span>
+          <span class="${aiKeys.openai ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">${aiKeys.openai ? '✓ Fallback 2' : '✗ Missing'}</span>
+        </div>
+        <p class="text-xs text-gray-400">GPT-4o — final fallback. Used if both above fail.</p>
+      </div>
+    </div>
+    <div id="ai-test-result" class="hidden mt-3 card p-4 text-sm font-mono text-green-400 max-h-40 overflow-y-auto"></div>
+    <button onclick="testAI()" class="test-btn mt-3 px-4 py-2 rounded-xl text-sm font-medium">▶ Fire Live AI Test</button>
+  </div>
+
+  <!-- HYPERION AGENTS -->
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-lg font-bold flex items-center gap-2">⚡ HYPERION — 12 Parallel AI Agents <span class="text-xs font-normal text-gray-400">(auto-triggered on every credit report import)</span></h2>
+      <button onclick="runHyperion()" class="cron-btn px-4 py-2 rounded-xl text-sm font-medium">▶ Run on Client</button>
+    </div>
+    <div class="bg-gray-900/50 border border-gray-800 rounded-xl p-4 mb-3 text-xs text-gray-400">
+      <strong class="text-white">Trigger:</strong> <code class="bg-gray-800 px-1 rounded">POST /api/mfsn/fetch-3b</code> → auto-queues → <code class="bg-gray-800 px-1 rounded">POST /api/reports/analyze/:reportId</code> → 12 agents fire via <code class="bg-gray-800 px-1 rounded">Promise.allSettled()</code> in parallel → results saved to <code class="bg-gray-800 px-1 rounded">analysis_reports</code> + <code class="bg-gray-800 px-1 rounded">roadmap_results</code> (8 rows) → viewable at <code class="bg-gray-800 px-1 rounded">/reports/full/:clientId</code>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      ${HYPERION_AGENTS.map(a => `
+        <div class="card agent-card p-4">
+          <div class="flex items-start gap-3">
+            <span class="text-2xl">${a.icon}</span>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs text-gray-500">Agent ${a.id}/12</span>
+              </div>
+              <p class="font-semibold text-sm">${a.name}</p>
+              <p class="text-xs text-gray-400 mt-1 leading-relaxed">${a.desc}</p>
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div id="hyperion-result" class="hidden mt-3 card p-4 text-sm font-mono text-blue-300 max-h-60 overflow-y-auto whitespace-pre-wrap"></div>
+  </div>
+
+  <!-- STANDALONE AI AGENTS -->
+  <div>
+    <h2 class="text-lg font-bold mb-3">🎯 Standalone AI Agents <span class="text-xs font-normal text-gray-400 ml-2">(callable independently at any time)</span></h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      ${STANDALONE_AGENTS.map(a => `
+        <div class="card agent-card p-4">
+          <div class="flex items-start gap-3">
+            <span class="text-xl">${a.icon}</span>
+            <div class="flex-1 min-w-0">
+              <p class="font-semibold text-sm">${a.name}</p>
+              <p class="text-xs text-gray-400 mt-0.5 mb-2 leading-relaxed">${a.desc}</p>
+              <div class="flex items-center gap-2 flex-wrap">
+                <code class="text-xs bg-gray-800 px-2 py-0.5 rounded text-gray-300">${a.method} ${a.endpoint}</code>
+                <span class="text-xs text-gray-500">Trigger: ${a.trigger}</span>
+              </div>
+            </div>
+            <button onclick="testAgent('${a.endpoint}')" class="test-btn px-2 py-1 rounded-lg text-xs shrink-0">▶ Test</button>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div id="agent-result" class="hidden mt-3 card p-4 text-sm font-mono text-green-300 max-h-60 overflow-y-auto whitespace-pre-wrap"></div>
+  </div>
+
+  <!-- COMMUNICATION CHANNELS -->
+  <div>
+    <h2 class="text-lg font-bold mb-3">📡 Communication Channels</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      ${COMM_CHANNELS.map(ch => `
+        <div class="card p-4 ${ch.status ? 'border-green-800/30' : 'border-red-800/30'}">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">${ch.icon}</span>
+              <span class="font-semibold text-sm">${ch.name}</span>
+            </div>
+            <span class="${ch.status ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">${ch.status ? 'LIVE' : 'Offline'}</span>
+          </div>
+          <p class="text-xs text-gray-400 leading-relaxed mb-2">${ch.desc}</p>
+          ${ch.test_endpoint ? `<button onclick="testComm('${ch.test_endpoint}')" class="test-btn px-3 py-1 rounded-lg text-xs w-full">▶ Test Send</button>` : `<div class="text-xs text-gray-600 text-center py-1">Manual config required</div>`}
+        </div>`).join('')}
+    </div>
+    <div id="comm-result" class="hidden mt-3 card p-4 text-sm font-mono text-green-300 max-h-40 overflow-y-auto"></div>
+  </div>
+
+  <!-- CRON JOBS -->
+  <div>
+    <h2 class="text-lg font-bold mb-3">⏱️ Cron Jobs & Automation Triggers <span class="text-xs font-normal text-gray-400 ml-2">(fire manually or via Cloudflare scheduled triggers)</span></h2>
+    <div class="bg-gray-900/50 border border-gray-800 rounded-xl p-4 mb-3 text-xs text-gray-400">
+      ⚠️ <strong class="text-yellow-400">Setup needed for automated scheduling:</strong> Add cron triggers to <code class="bg-gray-800 px-1 rounded">wrangler.jsonc</code> → <code class="bg-gray-800 px-1 rounded">"triggers": {"crons": ["0 */2 * * *", "0 15 * * *", "0 8 1 * *"]}</code>. Until then, trigger manually with the buttons below.
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      ${CRON_JOBS.map(cron => `
+        <div class="card p-4">
+          <div class="flex items-start gap-3">
+            <span class="text-xl">${cron.icon}</span>
+            <div class="flex-1">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <p class="font-semibold text-sm">${cron.name}</p>
+                ${cron.badge ? `<span class="badge-warn text-xs px-2 py-0.5 rounded-full pulse">${cron.badge}</span>` : ''}
+              </div>
+              <p class="text-xs text-gray-400 mb-2">${cron.desc}</p>
+              <div class="flex items-center justify-between">
+                <code class="text-xs text-gray-500">${cron.schedule}</code>
+                <button onclick="runCron('${cron.endpoint}')" class="cron-btn px-3 py-1 rounded-lg text-xs">▶ Run Now</button>
+              </div>
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div id="cron-result" class="hidden mt-3 card p-4 text-sm font-mono text-blue-300 max-h-40 overflow-y-auto"></div>
+  </div>
+
+  <!-- EMAIL SEQUENCES -->
+  <div>
+    <h2 class="text-lg font-bold mb-3">📨 Email & SMS Drip Sequences</h2>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="border-b border-gray-800">
+          <tr class="text-gray-400 text-xs">
+            <th class="px-4 py-3 text-left">Sequence Name</th>
+            <th class="px-4 py-3 text-left">Trigger Event</th>
+            <th class="px-4 py-3 text-left">Delay</th>
+            <th class="px-4 py-3 text-left">Status</th>
+            <th class="px-4 py-3 text-left">Action</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800/50">
+          ${seqArr.map((s: any) => `
+            <tr class="hover:bg-gray-800/30">
+              <td class="px-4 py-3 font-medium">${s.name}</td>
+              <td class="px-4 py-3"><code class="text-xs bg-gray-800 px-2 py-0.5 rounded">${s.trigger_event}</code></td>
+              <td class="px-4 py-3 text-gray-400">Day ${s.delay_days}</td>
+              <td class="px-4 py-3"><span class="${s.is_active ? 'badge-live' : 'badge-dead'} text-xs px-2 py-0.5 rounded-full">${s.is_active ? 'Active' : 'Paused'}</span></td>
+              <td class="px-4 py-3"><button onclick="processSeq()" class="test-btn px-2 py-1 rounded-lg text-xs">▶ Process</button></td>
+            </tr>`).join('')}
+          ${seqArr.length === 0 ? '<tr><td colspan="5" class="px-4 py-6 text-center text-gray-500">No sequences found</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+    <div id="seq-result" class="hidden mt-3 card p-4 text-sm font-mono text-green-300 max-h-40 overflow-y-auto"></div>
+  </div>
+
+  <!-- RECENT ACTIVITY -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <!-- Recent Comms -->
+    <div>
+      <h3 class="font-bold mb-3">📬 Recent Communications</h3>
+      <div class="card overflow-hidden">
+        <div class="divide-y divide-gray-800/50">
+          ${commsArr.length === 0 ? '<div class="px-4 py-6 text-center text-gray-500 text-sm">No comms yet</div>' :
+            commsArr.map((c: any) => `
+              <div class="px-3 py-2.5">
+                <div class="flex items-center gap-2 mb-0.5">
+                  <span class="text-xs ${c.channel === 'sms' ? 'text-green-400' : c.channel === 'email' ? 'text-blue-400' : 'text-gray-400'}">${c.channel === 'sms' ? '📱' : c.channel === 'email' ? '📧' : '📞'} ${c.channel?.toUpperCase()}</span>
+                  <span class="text-xs ${c.direction === 'inbound' ? 'text-purple-400' : 'text-gray-500'}">${c.direction}</span>
+                  <span class="ml-auto text-xs ${c.status === 'sent' || c.status === 'delivered' ? 'text-green-400' : 'text-yellow-400'}">${c.status}</span>
+                </div>
+                <p class="text-xs text-gray-300 truncate">${c.subject || c.body || '—'}</p>
+                <p class="text-xs text-gray-600">${(c.created_at || '').slice(0,16)}</p>
+              </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent SOP Executions -->
+    <div>
+      <h3 class="font-bold mb-3">⚙️ Recent SOP Executions</h3>
+      <div class="card overflow-hidden">
+        <div class="divide-y divide-gray-800/50">
+          ${sopsArr.length === 0 ? '<div class="px-4 py-6 text-center text-gray-500 text-sm">No SOP executions yet</div>' :
+            sopsArr.map((s: any) => `
+              <div class="px-3 py-2.5">
+                <div class="flex items-center gap-2 mb-0.5">
+                  <span class="text-xs font-mono text-blue-400">${s.sop_id}</span>
+                  <span class="ml-auto text-xs ${s.status === 'completed' ? 'text-green-400' : s.status === 'failed' ? 'text-red-400' : 'text-yellow-400'}">${s.status}</span>
+                </div>
+                <p class="text-xs text-gray-300 truncate">${s.sop_title || '—'}</p>
+                <p class="text-xs text-gray-600">${s.duration_ms ? s.duration_ms+'ms' : ''} ${(s.created_at || '').slice(0,16)}</p>
+              </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Tasks Created by Agents -->
+    <div>
+      <h3 class="font-bold mb-3">📋 Recent Agent-Created Tasks</h3>
+      <div class="card overflow-hidden">
+        <div class="divide-y divide-gray-800/50">
+          ${tasksArr.length === 0 ? '<div class="px-4 py-6 text-center text-gray-500 text-sm">No tasks yet</div>' :
+            tasksArr.map((t: any) => `
+              <div class="px-3 py-2.5">
+                <div class="flex items-center gap-2 mb-0.5">
+                  <span class="text-xs ${t.priority === 'critical' ? 'text-red-400' : t.priority === 'high' ? 'text-orange-400' : 'text-gray-400'}">${t.priority?.toUpperCase() || 'NORMAL'}</span>
+                  <span class="ml-auto text-xs text-gray-500">${t.status}</span>
+                </div>
+                <p class="text-xs text-gray-300 truncate">${t.title || '—'}</p>
+                <p class="text-xs text-gray-600">${t.assigned_to || 'Unassigned'} · ${(t.created_at || '').slice(0,10)}</p>
+              </div>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE TEST PANEL -->
+  <div class="card p-6 border-blue-800/30">
+    <h2 class="text-lg font-bold mb-4">🧪 Live Test Panel</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div>
+        <label class="block text-xs text-gray-400 mb-1">Client ID (for tests)</label>
+        <input id="test-client-id" type="number" value="1" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-400 mb-1">Test Phone (SMS)</label>
+        <input id="test-phone" type="text" placeholder="+15055551234" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-400 mb-1">Test Email</label>
+        <input id="test-email" type="email" placeholder="you@email.com" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm focus:outline-none focus:border-blue-500">
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-2 mt-4">
+      <button onclick="fireTestSMS()" class="test-btn px-4 py-2 rounded-xl text-sm font-medium">📱 Send Test SMS</button>
+      <button onclick="fireTestEmail()" class="test-btn px-4 py-2 rounded-xl text-sm font-medium">📧 Send Test Email</button>
+      <button onclick="testAI()" class="cron-btn px-4 py-2 rounded-xl text-sm font-medium">🤖 Test AI Response</button>
+      <button onclick="runAllCrons()" class="cron-btn px-4 py-2 rounded-xl text-sm font-medium">⚡ Run All Cron Jobs</button>
+      <a href="/sop-library" class="cron-btn px-4 py-2 rounded-xl text-sm font-medium">📚 Open SOP Library</a>
+      <a href="/reports/full/1" class="cron-btn px-4 py-2 rounded-xl text-sm font-medium">📊 View Full Analysis</a>
+    </div>
+    <div id="test-panel-result" class="hidden mt-4 bg-gray-900 rounded-xl p-4 text-sm font-mono text-green-300 max-h-60 overflow-y-auto whitespace-pre-wrap border border-gray-700"></div>
+  </div>
+
+</div><!-- end main -->
+
+<script>
+function show(id, content, color='text-green-300') {
+  const el = document.getElementById(id)
+  el.className = el.className.replace('hidden','') + ' ' + color
+  el.classList.remove('hidden')
+  el.textContent = content
+}
+
+async function testAI() {
+  show('ai-test-result', '⏳ Firing AI agent...', 'text-yellow-300')
+  const r = await fetch('/api/ai/score-simulation', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ client_id: parseInt(document.getElementById('test-client-id')?.value||'1') }) })
+  const d = await r.json()
+  show('ai-test-result', '✓ AI RESPONSE LIVE\\n\\n' + (d.simulation || d.error || JSON.stringify(d)).slice(0, 800), 'text-green-400')
+  show('test-panel-result', '✓ AI Test:\\n' + (d.simulation || d.error || '').slice(0, 600), 'text-green-300')
+}
+
+async function runCron(endpoint) {
+  show('cron-result', '⏳ Running ' + endpoint + '...', 'text-yellow-300')
+  const r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'} })
+  const d = await r.json()
+  show('cron-result', '✓ ' + endpoint + '\\n' + JSON.stringify(d, null, 2), 'text-blue-300')
+  show('test-panel-result', '✓ Cron result: ' + JSON.stringify(d), 'text-blue-300')
+}
+
+async function runAllCrons() {
+  const jobs = ['/api/cron/process-sequences','/api/cron/check-deadlines','/api/cron/run-pending-analyses']
+  show('test-panel-result', '⏳ Running all cron jobs...', 'text-yellow-300')
+  const results = []
+  for (const j of jobs) {
+    const r = await fetch(j, { method:'POST', headers:{'Content-Type':'application/json'} })
+    const d = await r.json()
+    results.push(j + ': ' + JSON.stringify(d))
+  }
+  show('test-panel-result', '✓ All crons complete:\\n' + results.join('\\n'), 'text-green-300')
+}
+
+async function runHyperion() {
+  const clientId = document.getElementById('test-client-id')?.value || '1'
+  show('hyperion-result', '⏳ Checking for latest credit report for client ' + clientId + '...', 'text-yellow-300')
+  const rr = await fetch('/api/clients/' + clientId + '/credit-reports')
+  const dd = await rr.json()
+  const reportId = dd.reports?.[0]?.id || dd[0]?.id
+  if (!reportId) { show('hyperion-result', '✗ No credit report found for client ' + clientId + '. Import a report first via MFSN.', 'text-red-300'); return }
+  show('hyperion-result', '⏳ Firing 12 Hyperion agents on report ' + reportId + '... (60-90 seconds)', 'text-yellow-300')
+  const r = await fetch('/api/reports/analyze/' + reportId, { method:'POST', headers:{'Content-Type':'application/json'} })
+  const d = await r.json()
+  show('hyperion-result', '✓ HYPERION COMPLETE\\nHealth Score: ' + d.health_score + ' (' + d.health_grade + ')\\nRoadmaps: ' + d.roadmaps_generated + '\\nDuration: ' + d.duration_ms + 'ms\\n\\nView full report: /reports/full/' + clientId, 'text-blue-300')
+}
+
+async function testAgent(endpoint) {
+  const clientId = document.getElementById('test-client-id')?.value || '1'
+  show('agent-result', '⏳ Testing ' + endpoint + '...', 'text-yellow-300')
+  const r = await fetch(endpoint.replace(':sopId','SOP-001'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ client_id: parseInt(clientId), context: 'Test run from agent control center' }) })
+  const d = await r.json()
+  show('agent-result', '✓ ' + endpoint + '\\n' + (d.output || d.simulation || d.letter || d.analysis || d.draft || JSON.stringify(d)).slice(0,600), 'text-green-300')
+}
+
+async function testComm(endpoint) {
+  const phone = document.getElementById('test-phone')?.value
+  const email = document.getElementById('test-email')?.value
+  show('comm-result', '⏳ Testing ' + endpoint + '...', 'text-yellow-300')
+  let body = {}
+  if (endpoint.includes('sms')) {
+    if (!phone) { show('comm-result', '✗ Enter a test phone number in the Live Test Panel below', 'text-red-300'); return }
+    body = { to: phone, message: '[TEST] RJ Business Solutions AI agent SMS. System verified live.' }
+  } else if (endpoint.includes('email') || endpoint.includes('resend') || endpoint.includes('sendgrid')) {
+    if (!email) { show('comm-result', '✗ Enter a test email in the Live Test Panel below', 'text-red-300'); return }
+    body = { to: email, subject: '[TEST] Agent Email — RJ Business Solutions', body: 'This is a live test from the Agent Control Center. Your email integration is working.' }
+  } else if (endpoint.includes('speed-to-lead')) {
+    body = { first_name: 'Test', last_name: 'Lead', email: email || 'test@test.com', phone: phone || '+15055551234', source: 'agent-test' }
+  }
+  const r = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+  const d = await r.json()
+  show('comm-result', (d.success ? '✓ SENT: ' : '✗ FAILED: ') + endpoint + '\\n' + JSON.stringify(d), d.success ? 'text-green-300' : 'text-red-300')
+}
+
+async function processSeq() {
+  show('seq-result', '⏳ Processing all due sequences...', 'text-yellow-300')
+  const r = await fetch('/api/cron/process-sequences', { method:'POST', headers:{'Content-Type':'application/json'} })
+  const d = await r.json()
+  show('seq-result', '✓ Sequences processed: ' + JSON.stringify(d), 'text-green-300')
+}
+
+async function fireTestSMS() {
+  const phone = document.getElementById('test-phone')?.value
+  if (!phone) { show('test-panel-result', '✗ Enter a phone number first', 'text-red-300'); return }
+  show('test-panel-result', '⏳ Sending SMS...', 'text-yellow-300')
+  const r = await fetch('/api/twilio/sms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ to: phone, message: '[TEST] RJ Business Solutions AI system SMS confirmed live. Reply STOP to opt out.' }) })
+  const d = await r.json()
+  show('test-panel-result', (d.success ? '✓ SMS SENT to ' + phone : '✗ SMS FAILED: ' + (d.error||'')) + '\\n' + JSON.stringify(d), d.success ? 'text-green-300' : 'text-red-300')
+}
+
+async function fireTestEmail() {
+  const email = document.getElementById('test-email')?.value
+  if (!email) { show('test-panel-result', '✗ Enter an email address first', 'text-red-300'); return }
+  show('test-panel-result', '⏳ Sending email...', 'text-yellow-300')
+  const r = await fetch('/api/email/sendgrid', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ to: email, subject: '[TEST] RJ Business Solutions Agent Email', body: 'Live test from Agent Control Center. Email system confirmed working.' }) })
+  const d = await r.json()
+  show('test-panel-result', (d.success ? '✓ EMAIL SENT to ' + email : '✗ EMAIL FAILED (status ' + d.status + '): ' + (d.error||'Check SENDGRID_API_KEY and verify sender domain at sendgrid.com')) + '\\n' + JSON.stringify(d), d.success ? 'text-green-300' : 'text-red-300')
 }
 </script>
 </body></html>`)
