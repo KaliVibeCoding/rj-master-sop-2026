@@ -463,7 +463,8 @@ app.get('/api/ops/disputes', async (c) => {
 
 app.post('/api/ops/disputes', async (c) => {
   const { DB } = c.env; const body = await c.req.json()
-  const r = await DB.prepare('INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, dispute_round, status, fcra_section, letter_template, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.client_id, body.bureau, body.account_name, body.account_number || null, body.dispute_reason, body.dispute_round || 1, body.status || 'pending', body.fcra_section || null, body.letter_template || null, body.notes || null).run()
+  const bureau = String(body.bureau || '').toLowerCase().trim()
+  const r = await DB.prepare('INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, dispute_round, status, fcra_section, letter_template, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.client_id, bureau, body.account_name, body.account_number || null, body.dispute_reason, body.dispute_round || 1, body.status || 'pending', body.fcra_section || null, body.letter_template || null, body.notes || null).run()
   await DB.prepare("INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?, 'dispute_created', 'dispute', ?, ?)").bind(body.actor || 'system', r.meta.last_row_id, `${body.bureau}: ${body.account_name} — ${body.dispute_reason}`).run()
   return c.json({ id: r.meta.last_row_id, success: true })
 })
@@ -7155,7 +7156,11 @@ app.post('/api/cron/compliance-check', async (c) => {
   let checked = 0, alertsCreated = 0
   for (const source of sources.results as any[]) {
     try {
-      const r = await fetch(source.source_url, { method: 'HEAD', headers: { 'User-Agent': 'RJBSComplianceBot/1.0' } })
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 3000)
+      try {
+        await fetch(source.source_url, { method: 'HEAD', headers: { 'User-Agent': 'RJBSComplianceBot/1.0' }, signal: ac.signal })
+      } finally { clearTimeout(timer) }
       await DB.prepare(`UPDATE compliance_sources SET last_checked_at = datetime('now') WHERE id = ?`).bind(source.id).run()
       checked++
       // Use AI to summarize any new compliance context (lightweight check)
@@ -9908,17 +9913,23 @@ app.get('/api/files/:key{.+}', async (c) => {
 
 // ─── Dispute letter PDF (HTML print-shim, server returns print-ready HTML
 //     with @media print rules so browser PDF export produces a clean file) ───
-app.get('/dispute/letter/:disputeId.pdf', async (c) => {
+app.get('/dispute/letter/:disputeId/pdf', async (c) => {
+  return Response.redirect(new URL(c.req.url).origin + `/dispute/letter/${c.req.param('disputeId')}?print=1`, 302)
+})
+app.get('/dispute/letter-pdf/:disputeId', async (c) => {
   if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
-  const id = c.req.param('disputeId')
+  const raw = c.req.param('disputeId') || ''
+  const id = raw.replace(/\.pdf$/i, '')
   const d = await c.env.DB.prepare('SELECT * FROM disputes WHERE id = ?').bind(id).first<any>()
   if (!d) return c.json({ error: 'Dispute not found' }, 404)
   const client = await c.env.DB.prepare('SELECT * FROM clients WHERE id = ?').bind(d.client_id).first<any>()
   const bureauAddr: Record<string, string> = {
-    Experian: 'Experian\nP.O. Box 4500\nAllen, TX 75013',
-    Equifax: 'Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374',
-    TransUnion: 'TransUnion Consumer Solutions\nP.O. Box 2000\nChester, PA 19016',
+    experian: 'Experian\nP.O. Box 4500\nAllen, TX 75013',
+    equifax: 'Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374',
+    transunion: 'TransUnion Consumer Solutions\nP.O. Box 2000\nChester, PA 19016',
   }
+  const bureauKey = String(d.bureau || '').toLowerCase().trim()
+  const bureauAddress = bureauAddr[bureauKey] || `${d.bureau || 'Bureau'}\n(address on file)`
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
   return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Dispute Letter — ${d.id}</title>
 <style>
@@ -9935,7 +9946,7 @@ app.get('/dispute/letter/:disputeId.pdf', async (c) => {
   ${client?.address || ''}<br/>
   ${today}</p>
 </div>
-<div class="addr">${(bureauAddr[d.bureau] || d.bureau)}</div>
+<div class="addr">${bureauAddress}</div>
 <p><strong>RE: Dispute of Inaccurate Information — Account ${d.account_name || ''} ${d.account_number ? '(****' + String(d.account_number).slice(-4) + ')' : ''}</strong></p>
 <p>To Whom It May Concern:</p>
 <p>I am writing pursuant to the Fair Credit Reporting Act (15 U.S.C. §1681i) to dispute inaccurate information appearing on my consumer credit report. The following account is reported inaccurately and must be investigated, corrected, or deleted within 30 days:</p>
