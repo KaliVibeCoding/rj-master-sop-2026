@@ -58,10 +58,16 @@ check "Privacy"                GET  /privacy                       200
 check "SOP library page"       GET  /sop-library                   200
 check "Agents page"            GET  /agents                        200
 
-# API-key protected (should 401 without)
-check "Clients list (no key)"  GET  /api/ops/clients               401
-check "Disputes list (no key)" GET  /api/ops/disputes              401
-check "AI models (no key)"     GET  /api/ai/models                 401
+# API-key protected: 401 without, 200 with
+if [[ -n "$KEY" ]]; then
+  check "Clients list (keyed)"   GET  /api/ops/clients               200
+  check "Disputes list (keyed)"  GET  /api/ops/disputes              200
+  check "AI models (keyed)"      GET  /api/ai/models                 200
+else
+  check "Clients list (no key)"  GET  /api/ops/clients               401
+  check "Disputes list (no key)" GET  /api/ops/disputes              401
+  check "AI models (no key)"     GET  /api/ai/models                 401
+fi
 
 # Public lead capture
 check "Speed-to-lead"          POST /api/speed-to-lead             "200,400" '{"client_id":0,"first_name":"Smoke","phone":"+15551234567","email":"smoke@test.com"}'

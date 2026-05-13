@@ -214,12 +214,12 @@ app.use('/api/*', async (c, next) => {
     try {
       const hash = await sha256Hex(apiKey)
       const key = await c.env.DB.prepare(
-        'SELECT id, tenant_id, scope, is_active FROM api_keys WHERE key_hash = ? AND is_active = 1'
+        'SELECT id, tenant_id, permissions, is_active FROM api_keys WHERE key_hash = ? AND is_active = 1'
       ).bind(hash).first<any>()
       if (!key) return c.json({ error: 'Invalid API key' }, 401)
-      c.set('apiKey', { id: key.id, tenant_id: key.tenant_id, scope: key.scope || 'all' })
-      // Update last_used best-effort
-      c.env.DB.prepare('UPDATE api_keys SET last_used_at = datetime("now") WHERE id = ?').bind(key.id).run().catch(() => {})
+      c.set('apiKey', { id: key.id, tenant_id: key.tenant_id, scope: key.permissions || 'all' })
+      // Update last_used + request_count best-effort
+      c.env.DB.prepare('UPDATE api_keys SET last_used_at = datetime("now"), request_count = COALESCE(request_count, 0) + 1 WHERE id = ?').bind(key.id).run().catch(() => {})
     } catch (e: any) {
       // If api_keys table missing, fail closed but with clear message.
       return c.json({ error: 'API key store unavailable', detail: e?.message }, 503)
