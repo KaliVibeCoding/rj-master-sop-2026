@@ -87,20 +87,67 @@ See `.cursorrules` for the compact agent rules file.
 ## Deployment
 
 - **Platform**: Cloudflare Pages
-- **Database**: Cloudflare D1 (SQLite)
+- **Database**: Cloudflare D1 (SQLite) — binding `DB`
+- **Storage**: Cloudflare R2 (documents) — binding `DOCS`
+- **Cache / Rate Limit**: Cloudflare KV — binding `RATE_LIMIT`
+- **Queue**: Cloudflare Queues for webhook retries — binding `WEBHOOK_QUEUE`
 - **Runtime**: Hono + Cloudflare Workers
 - **Build**: Vite SSR bundle
 
+### Quick commands
+
 ```bash
-npm run build                    # Build
-pm2 start ecosystem.config.cjs  # Local dev
-wrangler pages deploy dist       # Production deploy
+npm run build              # Build production bundle
+npm run dev                # Local Vite dev server
+npm run migrate:local      # Apply all SQL migrations to local D1
+npm run seed:local         # Seed local D1
+npm run migrate:remote     # Apply migrations to production D1
+npm run seed:remote        # Seed production D1
+npm run secrets:push       # Push all .dev.vars to CF Pages secrets
+npm run smoke              # Run endpoint smoke tests against $BASE_URL
+npm run deploy             # Full pipeline: build → migrate → deploy → smoke
+npm run deploy:quick       # Build + deploy only
+pm2 start ecosystem.config.cjs   # Local PM2 process
 ```
+
+### First-time setup
+
+1. `cp .dev.vars.example .dev.vars` and fill in keys.
+2. `npm run migrate:local && npm run seed:local`
+3. `pm2 start ecosystem.config.cjs` — service runs at http://localhost:3000.
+4. `npm run smoke` — verify all endpoints respond.
+5. Create production resources in CF dashboard: D1, R2 bucket `rj-sop-documents`,
+   KV namespace `RATE_LIMIT`, Queue `rj-sop-webhook-retries` + DLQ `rj-sop-webhook-dlq`.
+6. Update `wrangler.jsonc` with real KV namespace IDs (replace `REPLACE_ME` placeholders).
+7. `npm run secrets:push` to upload all `.dev.vars` to Pages secrets.
+8. `npm run deploy` — runs migrations + deploys + smoke tests.
+
+### Cron triggers (configured in wrangler.jsonc)
+
+| Schedule       | Endpoint                              | Purpose                         |
+|----------------|---------------------------------------|---------------------------------|
+| 09:00 UTC daily| `/api/cron/process-sequences`         | Email + SMS drip                |
+| 10:00 UTC daily| `/api/cron/generate-kpis`             | Daily KPI snapshot              |
+| 11:00 UTC m1   | `/api/cron/pull-reports`              | Monthly MFSN report refresh     |
+| 12:00 UTC daily| `/api/cron/compliance-check` + deadlines | Compliance + deadline checks |
+| Every 30 min   | `/api/cron/run-pending-analyses`      | Process pending AI analyses     |
+
+### Security
+
+- All `/api/*` endpoints (except public funnel, webhooks, SOP library reads) require
+  `X-API-Key` header **or** active staff session cookie.
+- Per-key rate limit: 600 req/min (KV-backed).
+- TOTP 2FA scaffolding on staff login (`/api/auth/2fa/*`).
+- SMS double opt-in (TCPA) via `/api/sms/opt-in/*`.
+- Cron endpoints require `X-Cron-Secret` matching `CRON_SECRET`.
+- Webhook retries with exponential backoff + dead-letter queue.
+- Security headers on every response (HSTS, X-Frame-Options, CSP-lite, Referrer-Policy).
 
 ## Tech Stack
 
-Hono 4.12+ • TypeScript • Vite 6 • Cloudflare D1 • Tailwind CSS • Chart.js
-MFSN API v1.0.0 • Twilio SMS/Voice • SendGrid • Resend • Stripe
+Hono 4.12+ • TypeScript • Vite 6 • Cloudflare D1 • Cloudflare R2 • Cloudflare KV
+Cloudflare Queues • Tailwind CSS • Chart.js • MFSN API v1.0.0
+Twilio SMS/Voice • SendGrid • Resend • Stripe • OpenRouter/Groq/OpenAI
 
 ---
 

@@ -12,21 +12,70 @@
       "database_name": "rj-sop-operations",
       "database_id": "62b785bb-c601-4271-b7a3-ad7efc7605ae"
     }
-  ]
-  // Secrets (set via `wrangler secret put` or .dev.vars for local):
-  // AUTH_SECRET — master session signing secret (set this!)
-  // ADMIN_PASSWORD — staff login password (default: rjbs2026)
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOCS",
+      "bucket_name": "rj-sop-documents",
+      "preview_bucket_name": "rj-sop-documents-preview"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT",
+      "id": "RATE_LIMIT_KV_ID_REPLACE_ME",
+      "preview_id": "RATE_LIMIT_KV_PREVIEW_ID_REPLACE_ME"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "WEBHOOK_QUEUE",
+        "queue": "rj-sop-webhook-retries"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "rj-sop-webhook-retries",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "rj-sop-webhook-dlq"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "0 9 * * *",
+      "0 10 * * *",
+      "0 11 1 * *",
+      "0 12 * * *",
+      "*/30 * * * *"
+    ]
+  },
+  "vars": {
+    "APP_NAME": "RJ Master SOP 2026",
+    "APP_VERSION": "1.0.0"
+  }
+  // ─── Secrets (set via `wrangler pages secret put <NAME>` or `.dev.vars` locally) ───
+  // AUTH_SECRET, ADMIN_PASSWORD, CRON_SECRET, APP_BASE_URL
   // MFSN_API_URL, MFSN_API_EMAIL, MFSN_API_PASSWORD
   // STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
   // TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
-  // SENDGRID_API_KEY, RESEND_API_KEY
+  // SENDGRID_API_KEY, RESEND_API_KEY, EMAIL_FROM, EMAIL_FROM_NAME
   // OPENROUTER_API_KEY, GROQ_API_KEY, OPENAI_API_KEY
-  // GHL_API_KEY, GHL_LOCATION_ID
+  // GHL_API_KEY, GHL_LOCATION_ID, TOTP_ISSUER
   //
-  // CRON JOBS — trigger these endpoints on a schedule:
-  // Daily 9am:   POST /api/cron/process-sequences  (email+SMS drip)
-  // Daily 9am:   POST /api/cron/generate-kpis      (KPI snapshot)
-  // Monthly 1st: POST /api/cron/pull-reports        (credit report refresh)
-  // Use cron-job.org, Cloudflare Workers Cron, or any HTTP scheduler.
-  // Secure with X-Cron-Secret header matching CRON_SECRET env var.
+  // ─── Cron schedule (UTC) ──────────────────────────────────────────────────
+  //   Daily 09:00 UTC  → process email + SMS drip sequences
+  //   Daily 10:00 UTC  → generate KPI snapshots
+  //   Monthly 1st 11:00 UTC → pull MFSN reports for all opted-in clients
+  //   Daily 12:00 UTC  → compliance source check + deadline check
+  //   Every 30 min     → run pending AI analyses
+  //
+  // ─── Bindings exposed to Worker ───────────────────────────────────────────
+  //   env.DB             — D1 (SQLite)
+  //   env.DOCS           — R2 bucket for document uploads
+  //   env.RATE_LIMIT     — KV for rate-limiting + idempotency
+  //   env.WEBHOOK_QUEUE  — Queue for outbound webhook retries
 }
