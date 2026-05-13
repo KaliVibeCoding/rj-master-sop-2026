@@ -40,8 +40,10 @@ req() {
 req_cron() {
   local label="$1" method="$2" path="$3" expect="${4:-200}"
   TOTAL=$((TOTAL+1))
-  local code; code=$(curl -s --max-time "$MAXT" -o /tmp/it_out -w "%{http_code}" \
-    -X "$method" -H "x-cron-secret: $CRON_SECRET" "$BASE$path" 2>/dev/null || echo 000)
+  # Write code separately to avoid body bleed-through on giant JSON responses
+  local code; code=$(curl -s --max-time "$MAXT" -o /tmp/it_out -w "%{http_code}\n" \
+    -X "$method" -H "x-cron-secret: $CRON_SECRET" "$BASE$path" 2>/dev/null | tail -n1 || echo 000)
+  code="${code//[^0-9]/}"; code="${code:0:3}"
   if [[ ",$expect," == *",$code,"* ]]; then
     PASS=$((PASS+1)); printf "  ${GREEN}✓${NC} %-45s %s (HTTP %s)\n" "$label" "$method $path" "$code"
   else

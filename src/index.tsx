@@ -5722,7 +5722,8 @@ async function scheduleCall(clientId) {
 app.get('/dispute/letter/:disputeId', async (c) => {
   const { DB } = c.env
   if (!DB) return c.html('<h1>Database required</h1>', 500)
-  const disputeId = c.req.param('disputeId')
+  const rawId = c.req.param('disputeId') || ''
+  const disputeId = rawId.replace(/\.pdf$/i, '')  // accept both /letter/:id and /letter/:id.pdf
   if (disputeId === 'none') return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>No dispute selected</h2><p>Go to a client page and select a specific dispute.</p></body></html>`)
   const dispute = await DB.prepare(`SELECT d.*, c.first_name, c.last_name, c.email FROM disputes d LEFT JOIN clients c ON c.id = d.client_id WHERE d.id = ?`).bind(disputeId).first() as any
   if (!dispute) return c.html('<h1>Dispute not found</h1>', 404)
