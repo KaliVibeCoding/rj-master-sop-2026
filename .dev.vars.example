@@ -1,0 +1,45 @@
+# RJ Business Solutions — Master SOP 2026
+# Local development secrets. Copy this file to `.dev.vars` and fill in values.
+# DO NOT COMMIT `.dev.vars`.
+#
+# For production, set each one with:
+#   npx wrangler pages secret put <NAME> --project-name rj-master-sop-2026
+
+# ─── Core ────────────────────────────────────────────────────────────────────
+APP_BASE_URL=http://localhost:3000
+AUTH_SECRET=change-me-to-a-long-random-string
+ADMIN_PASSWORD=rjbs2026
+CRON_SECRET=change-me-to-a-long-random-cron-secret
+
+# ─── Stripe (billing) ────────────────────────────────────────────────────────
+STRIPE_SECRET_KEY=
+STRIPE_PUBLISHABLE_KEY=
+STRIPE_WEBHOOK_SECRET=
+
+# ─── AI Autopilot (at least one required) ────────────────────────────────────
+OPENROUTER_API_KEY=
+GROQ_API_KEY=
+OPENAI_API_KEY=
+
+# ─── Twilio (SMS + Voice) ────────────────────────────────────────────────────
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+
+# ─── MFSN (MyFreeScoreNow) credit pulls ──────────────────────────────────────
+MFSN_API_URL=https://api.myfreescorenow.com
+MFSN_API_EMAIL=
+MFSN_API_PASSWORD=
+
+# ─── Email ───────────────────────────────────────────────────────────────────
+SENDGRID_API_KEY=
+RESEND_API_KEY=
+EMAIL_FROM=ops@rjbusinesssolutions.org
+EMAIL_FROM_NAME=RJ Business Solutions
+
+# ─── GoHighLevel ─────────────────────────────────────────────────────────────
+GHL_API_KEY=
+GHL_LOCATION_ID=
+
+# ─── 2FA / TOTP (optional, for staff login hardening) ────────────────────────
+TOTP_ISSUER=RJ Business Solutions

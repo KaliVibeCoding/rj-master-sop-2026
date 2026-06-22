@@ -95,9 +95,155 @@ type Bindings = {
   COMPANY_TIKTOK: string
   OWNER_NAME: string
   OWNER_EMAIL: string
+  // ---- Cloudflare bindings added in wrangler.jsonc ----
+  DOCS: R2Bucket
+  RATE_LIMIT: KVNamespace
+  WEBHOOK_QUEUE: Queue
+  // ---- Cron + auth secrets ----
+  CRON_SECRET: string
+  AUTH_SECRET: string
+  ADMIN_PASSWORD: string
+  EMAIL_FROM: string
+  EMAIL_FROM_NAME: string
+  TOTP_ISSUER: string
 }
-const app = new Hono<{ Bindings: Bindings }>()
+
+type Variables = {
+  apiKey?: { id: number; tenant_id: number | null; scope: string }
+  staffUser?: { id: number; email: string; role: string }
+}
+
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 app.use('/api/*', cors())
+
+// ─── Security headers on every response ─────────────────────────────────────
+app.use('*', async (c, next) => {
+  await next()
+  c.res.headers.set('X-Content-Type-Options', 'nosniff')
+  c.res.headers.set('X-Frame-Options', 'SAMEORIGIN')
+  c.res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.res.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  c.res.headers.set('Permissions-Policy', 'geolocation=(), microphone=(), camera=()')
+})
+
+// ─── Helpers: API-key middleware + rate limiter ─────────────────────────────
+// Public routes that never require an API key (webhooks, public funnels, auth, portal, intake, signup, statics, SOP library reads).
+const PUBLIC_API_PREFIXES = [
+  '/api/auth/',
+  '/api/stripe/webhook',
+  '/api/twilio/inbound',
+  '/api/twilio/voice',
+  '/api/twilio/voice-status',
+  '/api/email/events',
+  '/api/cron/',
+  '/api/ghl/webhook',
+  '/api/leads',                     // public funnel lead capture
+  '/api/speed-to-lead',
+  '/api/intake/',
+  '/api/sign/',
+  '/api/portal/',
+  '/api/signup/',
+  '/api/affiliates/track',
+  '/api/affiliates/portal-login',
+  '/api/integrations/status',
+]
+
+function isPublicApi(path: string): boolean {
+  if (!path.startsWith('/api/')) return true
+  // Public read-only SOP library endpoints
+  if (
+    path === '/api/phases' ||
+    path === '/api/sops' ||
+    path.startsWith('/api/sops/') ||
+    path === '/api/stats' ||
+    path === '/api/legal-changes-2026' ||
+    path === '/api/templates' ||
+    path.startsWith('/api/templates/') ||
+    path.startsWith('/api/agent/')
+  ) return true
+  return PUBLIC_API_PREFIXES.some(p => path.startsWith(p))
+}
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Rate limiter using KV (best-effort). Fail-open if KV not bound.
+async function rateLimit(env: Bindings, key: string, limit: number, windowSec: number): Promise<{ ok: boolean; remaining: number }> {
+  try {
+    if (!env.RATE_LIMIT) return { ok: true, remaining: limit }
+    const raw = await env.RATE_LIMIT.get(key)
+    const now = Math.floor(Date.now() / 1000)
+    let count = 0, reset = now + windowSec
+    if (raw) {
+      const parsed = JSON.parse(raw) as { count: number; reset: number }
+      if (parsed.reset > now) { count = parsed.count; reset = parsed.reset }
+    }
+    count += 1
+    await env.RATE_LIMIT.put(key, JSON.stringify({ count, reset }), { expirationTtl: Math.max(windowSec, reset - now) })
+    return { ok: count <= limit, remaining: Math.max(0, limit - count) }
+  } catch { return { ok: true, remaining: limit } }
+}
+
+// ─── API key auth on /api/* (except public + webhook routes) ────────────────
+app.use('/api/*', async (c, next) => {
+  const path = new URL(c.req.url).pathname
+  if (isPublicApi(path)) return next()
+
+  // Allow staff session cookie (already set by /api/auth/login) to bypass key check.
+  const cookie = c.req.header('cookie') || ''
+  const m = cookie.match(/rjbs_session=([^;]+)/)
+  if (m && c.env.DB) {
+    try {
+      const session = await c.env.DB.prepare(
+        'SELECT id, staff_id, staff_email, role FROM staff_sessions WHERE token = ? AND expires_at > datetime("now")'
+      ).bind(m[1]).first<any>()
+      if (session) {
+        c.set('staffUser', { id: session.staff_id || 0, email: session.staff_email, role: session.role })
+        return next()
+      }
+    } catch { /* table may not exist yet */ }
+  }
+
+  const apiKey = c.req.header('x-api-key') || c.req.header('authorization')?.replace(/^Bearer\s+/i, '')
+  if (!apiKey) return c.json({ error: 'API key required', hint: 'Pass X-API-Key header or use staff login' }, 401)
+
+  // Validate key
+  if (c.env.DB) {
+    try {
+      const hash = await sha256Hex(apiKey)
+      const key = await c.env.DB.prepare(
+        'SELECT id, tenant_id, permissions, is_active FROM api_keys WHERE key_hash = ? AND is_active = 1'
+      ).bind(hash).first<any>()
+      if (!key) return c.json({ error: 'Invalid API key' }, 401)
+      c.set('apiKey', { id: key.id, tenant_id: key.tenant_id, scope: key.permissions || 'all' })
+      // Update last_used + request_count best-effort
+      c.env.DB.prepare('UPDATE api_keys SET last_used_at = datetime("now"), request_count = COALESCE(request_count, 0) + 1 WHERE id = ?').bind(key.id).run().catch(() => {})
+    } catch (e: any) {
+      // If api_keys table missing, fail closed but with clear message.
+      return c.json({ error: 'API key store unavailable', detail: e?.message }, 503)
+    }
+  }
+
+  // Per-key rate limit (default 600/min, override by scope).
+  const rl = await rateLimit(c.env, `rl:api:${apiKey.slice(0, 12)}`, 600, 60)
+  if (!rl.ok) return c.json({ error: 'Rate limit exceeded', retry_after: 60 }, 429)
+  c.res.headers.set('X-RateLimit-Remaining', String(rl.remaining))
+  await next()
+})
+
+// ─── Cron secret middleware ─────────────────────────────────────────────────
+app.use('/api/cron/*', async (c, next) => {
+  const secret = c.req.header('x-cron-secret') || ''
+  const expected = c.env.CRON_SECRET || ''
+  if (!expected) {
+    // Allow unguarded cron only when no secret configured (local dev convenience).
+    return next()
+  }
+  if (secret !== expected) return c.json({ error: 'Invalid cron secret' }, 401)
+  await next()
+})
 
 // ============================================================
 // RJ BUSINESS SOLUTIONS — MASTER SOP 2026 OPERATIONS ENGINE
@@ -317,7 +463,8 @@ app.get('/api/ops/disputes', async (c) => {
 
 app.post('/api/ops/disputes', async (c) => {
   const { DB } = c.env; const body = await c.req.json()
-  const r = await DB.prepare('INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, dispute_round, status, fcra_section, letter_template, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.client_id, body.bureau, body.account_name, body.account_number || null, body.dispute_reason, body.dispute_round || 1, body.status || 'pending', body.fcra_section || null, body.letter_template || null, body.notes || null).run()
+  const bureau = String(body.bureau || '').toLowerCase().trim()
+  const r = await DB.prepare('INSERT INTO disputes (client_id, bureau, account_name, account_number, dispute_reason, dispute_round, status, fcra_section, letter_template, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.client_id, bureau, body.account_name, body.account_number || null, body.dispute_reason, body.dispute_round || 1, body.status || 'pending', body.fcra_section || null, body.letter_template || null, body.notes || null).run()
   await DB.prepare("INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES (?, 'dispute_created', 'dispute', ?, ?)").bind(body.actor || 'system', r.meta.last_row_id, `${body.bureau}: ${body.account_name} — ${body.dispute_reason}`).run()
   return c.json({ id: r.meta.last_row_id, success: true })
 })
@@ -5575,7 +5722,8 @@ async function scheduleCall(clientId) {
 app.get('/dispute/letter/:disputeId', async (c) => {
   const { DB } = c.env
   if (!DB) return c.html('<h1>Database required</h1>', 500)
-  const disputeId = c.req.param('disputeId')
+  const rawId = c.req.param('disputeId') || ''
+  const disputeId = rawId.replace(/\.pdf$/i, '')  // accept both /letter/:id and /letter/:id.pdf
   if (disputeId === 'none') return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>No dispute selected</h2><p>Go to a client page and select a specific dispute.</p></body></html>`)
   const dispute = await DB.prepare(`SELECT d.*, c.first_name, c.last_name, c.email FROM disputes d LEFT JOIN clients c ON c.id = d.client_id WHERE d.id = ?`).bind(disputeId).first() as any
   if (!dispute) return c.html('<h1>Dispute not found</h1>', 404)
@@ -7009,7 +7157,11 @@ app.post('/api/cron/compliance-check', async (c) => {
   let checked = 0, alertsCreated = 0
   for (const source of sources.results as any[]) {
     try {
-      const r = await fetch(source.source_url, { method: 'HEAD', headers: { 'User-Agent': 'RJBSComplianceBot/1.0' } })
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 3000)
+      try {
+        await fetch(source.source_url, { method: 'HEAD', headers: { 'User-Agent': 'RJBSComplianceBot/1.0' }, signal: ac.signal })
+      } finally { clearTimeout(timer) }
       await DB.prepare(`UPDATE compliance_sources SET last_checked_at = datetime('now') WHERE id = ?`).bind(source.id).run()
       checked++
       // Use AI to summarize any new compliance context (lightweight check)
@@ -9733,4 +9885,327 @@ app.get('/privacy', async (c) => {
 </div></div></body></html>`)
 })
 
-export default app
+// ============================================================
+// ADDITIONAL HARDENING ENDPOINTS — phase-2 production features
+// ============================================================
+
+// ─── R2 file upload helper ──────────────────────────────────────────────────
+app.post('/api/files/upload', async (c) => {
+  if (!c.env.DOCS) return c.json({ error: 'R2 bucket not bound' }, 503)
+  const form = await c.req.formData()
+  const file = form.get('file') as File | null
+  const folder = (form.get('folder') as string) || 'misc'
+  if (!file) return c.json({ error: 'No file' }, 400)
+  const key = `${folder}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+  await c.env.DOCS.put(key, file.stream(), { httpMetadata: { contentType: file.type } })
+  return c.json({ ok: true, key, size: file.size, content_type: file.type })
+})
+
+app.get('/api/files/:key{.+}', async (c) => {
+  if (!c.env.DOCS) return c.json({ error: 'R2 bucket not bound' }, 503)
+  const key = c.req.param('key')
+  const obj = await c.env.DOCS.get(key)
+  if (!obj) return c.json({ error: 'Not found' }, 404)
+  const headers = new Headers()
+  obj.writeHttpMetadata(headers)
+  headers.set('etag', obj.httpEtag)
+  return new Response(obj.body, { headers })
+})
+
+// ─── Dispute letter PDF (HTML print-shim, server returns print-ready HTML
+//     with @media print rules so browser PDF export produces a clean file) ───
+app.get('/dispute/letter/:disputeId/pdf', async (c) => {
+  return Response.redirect(new URL(c.req.url).origin + `/dispute/letter/${c.req.param('disputeId')}?print=1`, 302)
+})
+app.get('/dispute/letter-pdf/:disputeId', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const raw = c.req.param('disputeId') || ''
+  const id = raw.replace(/\.pdf$/i, '')
+  const d = await c.env.DB.prepare('SELECT * FROM disputes WHERE id = ?').bind(id).first<any>()
+  if (!d) return c.json({ error: 'Dispute not found' }, 404)
+  const client = await c.env.DB.prepare('SELECT * FROM clients WHERE id = ?').bind(d.client_id).first<any>()
+  const bureauAddr: Record<string, string> = {
+    experian: 'Experian\nP.O. Box 4500\nAllen, TX 75013',
+    equifax: 'Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374',
+    transunion: 'TransUnion Consumer Solutions\nP.O. Box 2000\nChester, PA 19016',
+  }
+  const bureauKey = String(d.bureau || '').toLowerCase().trim()
+  const bureauAddress = bureauAddr[bureauKey] || `${d.bureau || 'Bureau'}\n(address on file)`
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+  return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Dispute Letter — ${d.id}</title>
+<style>
+  @page { size: letter; margin: 1in; }
+  body { font-family: 'Times New Roman', serif; font-size: 12pt; line-height: 1.6; color: #000; }
+  .header { margin-bottom: 2em; }
+  .addr { white-space: pre-line; margin-bottom: 1.5em; }
+  .actions { padding: 1em; background: #f5f5f5; }
+  @media print { .actions { display: none; } }
+</style></head><body>
+<div class="actions"><button onclick="window.print()">Print / Save as PDF</button></div>
+<div class="header">
+  <p>${client?.first_name || ''} ${client?.last_name || ''}<br/>
+  ${client?.address || ''}<br/>
+  ${today}</p>
+</div>
+<div class="addr">${bureauAddress}</div>
+<p><strong>RE: Dispute of Inaccurate Information — Account ${d.account_name || ''} ${d.account_number ? '(****' + String(d.account_number).slice(-4) + ')' : ''}</strong></p>
+<p>To Whom It May Concern:</p>
+<p>I am writing pursuant to the Fair Credit Reporting Act (15 U.S.C. §1681i) to dispute inaccurate information appearing on my consumer credit report. The following account is reported inaccurately and must be investigated, corrected, or deleted within 30 days:</p>
+<p><strong>Account:</strong> ${d.account_name || ''}<br/>
+<strong>Account #:</strong> ${d.account_number || 'on file'}<br/>
+<strong>Reason for dispute:</strong> ${d.dispute_reason || 'Inaccurate reporting'}<br/>
+<strong>FCRA section:</strong> ${d.fcra_section || '§1681i'}</p>
+<p>${d.dispute_round && parseInt(d.dispute_round) > 1 ? 'This is a follow-up dispute (Round ' + d.dispute_round + '). Your prior verification was insufficient — please provide the Method of Verification (MOV) used and the name, address and telephone of the furnisher contacted, as required by §1681i(a)(7).' : 'Please conduct a reasonable reinvestigation under §1681i(a)(1).'}</p>
+<p>Enclosed: copy of government-issued ID and proof of address. Please send the results of your investigation in writing.</p>
+<p>Sincerely,<br/><br/>
+${client?.first_name || ''} ${client?.last_name || ''}<br/>
+SSN: XXX-XX-${(client?.ssn_last4 || '0000')}<br/>
+DOB: ${client?.dob || 'on file'}</p>
+</body></html>`)
+})
+
+// ─── SMS double opt-in (TCPA) ───────────────────────────────────────────────
+app.post('/api/sms/opt-in/start', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const { phone, client_id } = await c.req.json<{ phone: string; client_id?: number }>()
+  if (!phone) return c.json({ error: 'phone required' }, 400)
+  const code = String(Math.floor(100000 + Math.random() * 900000))
+  await c.env.DB.prepare(
+    `INSERT OR REPLACE INTO sms_opt_in (phone, client_id, code, status, created_at)
+     VALUES (?, ?, ?, 'pending', datetime('now'))`
+  ).bind(phone, client_id || null, code).run().catch(() => {})
+  // Best-effort Twilio send
+  if (c.env.TWILIO_ACCOUNT_SID && c.env.TWILIO_AUTH_TOKEN && c.env.TWILIO_PHONE_NUMBER) {
+    const body = new URLSearchParams({
+      To: phone,
+      From: c.env.TWILIO_PHONE_NUMBER,
+      Body: `RJ Business Solutions: Reply YES ${code} to confirm SMS updates. Msg & data rates may apply. Reply STOP to opt out.`,
+    })
+    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${c.env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Basic ' + btoa(`${c.env.TWILIO_ACCOUNT_SID}:${c.env.TWILIO_AUTH_TOKEN}`),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    }).catch(() => {})
+  }
+  return c.json({ ok: true, message: 'Verification code sent' })
+})
+
+app.post('/api/sms/opt-in/confirm', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const { phone, code } = await c.req.json<{ phone: string; code: string }>()
+  const row = await c.env.DB.prepare('SELECT * FROM sms_opt_in WHERE phone = ?').bind(phone).first<any>()
+  if (!row) return c.json({ error: 'No pending opt-in' }, 404)
+  if (row.code !== code) return c.json({ error: 'Invalid code' }, 400)
+  await c.env.DB.prepare(`UPDATE sms_opt_in SET status='confirmed', confirmed_at=datetime('now') WHERE phone = ?`).bind(phone).run()
+  return c.json({ ok: true, status: 'confirmed' })
+})
+
+app.get('/api/sms/opt-in/status/:phone', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const phone = c.req.param('phone')
+  const row = await c.env.DB.prepare('SELECT phone, status, confirmed_at FROM sms_opt_in WHERE phone = ?').bind(phone).first<any>()
+  return c.json({ phone, status: row?.status || 'none', confirmed_at: row?.confirmed_at || null })
+})
+
+// ─── 2FA (TOTP) scaffolding for staff ──────────────────────────────────────
+function base32Encode(buf: Uint8Array): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  let bits = 0, value = 0, out = ''
+  for (const b of buf) {
+    value = (value << 8) | b; bits += 8
+    while (bits >= 5) { out += alphabet[(value >> (bits - 5)) & 31]; bits -= 5 }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31]
+  return out
+}
+
+app.post('/api/auth/2fa/setup', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const user = c.get('staffUser')
+  if (!user) return c.json({ error: 'Not authenticated' }, 401)
+  const secretBytes = crypto.getRandomValues(new Uint8Array(20))
+  const secret = base32Encode(secretBytes)
+  await c.env.DB.prepare('UPDATE staff_users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').bind(secret, user.id).run().catch(() => {})
+  const issuer = encodeURIComponent(c.env.TOTP_ISSUER || 'RJ Business Solutions')
+  const account = encodeURIComponent(user.email)
+  const otpauth = `otpauth://totp/${issuer}:${account}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`
+  return c.json({ secret, otpauth, qr_url: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpauth)}` })
+})
+
+async function verifyTotp(secret: string, code: string): Promise<boolean> {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  const clean = secret.replace(/=+$/, '').toUpperCase()
+  let bits = 0, value = 0
+  const buf: number[] = []
+  for (const ch of clean) {
+    const idx = alphabet.indexOf(ch); if (idx < 0) continue
+    value = (value << 5) | idx; bits += 5
+    if (bits >= 8) { buf.push((value >> (bits - 8)) & 0xff); bits -= 8 }
+  }
+  const key = new Uint8Array(buf)
+  const now = Math.floor(Date.now() / 1000 / 30)
+  for (const t of [now - 1, now, now + 1]) {
+    const counter = new Uint8Array(8)
+    let v = t
+    for (let i = 7; i >= 0; i--) { counter[i] = v & 0xff; v = Math.floor(v / 256) }
+    const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'])
+    const sig = new Uint8Array(await crypto.subtle.sign('HMAC', cryptoKey, counter))
+    const offset = sig[sig.length - 1] & 0x0f
+    const bin = ((sig[offset] & 0x7f) << 24) | (sig[offset + 1] << 16) | (sig[offset + 2] << 8) | sig[offset + 3]
+    const otp = String(bin % 1_000_000).padStart(6, '0')
+    if (otp === code) return true
+  }
+  return false
+}
+
+app.post('/api/auth/2fa/verify', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const user = c.get('staffUser')
+  if (!user) return c.json({ error: 'Not authenticated' }, 401)
+  const { code } = await c.req.json<{ code: string }>()
+  const row = await c.env.DB.prepare('SELECT totp_secret FROM staff_users WHERE id = ?').bind(user.id).first<any>()
+  if (!row?.totp_secret) return c.json({ error: '2FA not set up' }, 400)
+  const ok = await verifyTotp(row.totp_secret, code)
+  if (!ok) return c.json({ error: 'Invalid code' }, 401)
+  await c.env.DB.prepare('UPDATE staff_users SET totp_enabled = 1 WHERE id = ?').bind(user.id).run()
+  return c.json({ ok: true, enabled: true })
+})
+
+app.post('/api/auth/2fa/disable', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'DB not bound' }, 503)
+  const user = c.get('staffUser')
+  if (!user) return c.json({ error: 'Not authenticated' }, 401)
+  await c.env.DB.prepare('UPDATE staff_users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?').bind(user.id).run()
+  return c.json({ ok: true, enabled: false })
+})
+
+// ─── Webhook retry queue endpoints (manual enqueue / DLQ inspect) ──────────
+app.post('/api/webhooks/enqueue', async (c) => {
+  if (!c.env.WEBHOOK_QUEUE) return c.json({ error: 'Queue not bound' }, 503)
+  const body = await c.req.json<{ url: string; payload: any; attempts?: number; secret?: string }>()
+  if (!body.url) return c.json({ error: 'url required' }, 400)
+  await c.env.WEBHOOK_QUEUE.send({ ...body, attempts: 0 })
+  return c.json({ ok: true })
+})
+
+// ─── Per-tenant subdomain routing (host-based tenant injection) ────────────
+app.use('/api/*', async (c, next) => {
+  const host = c.req.header('host') || ''
+  // e.g. acme.rj-master-sop-2026.pages.dev OR acme.your-domain.com
+  const parts = host.split('.')
+  if (parts.length >= 3 && parts[0] !== 'www' && parts[0] !== 'rj-master-sop-2026') {
+    const sub = parts[0].toLowerCase()
+    if (c.env.DB) {
+      try {
+        const tenant = await c.env.DB.prepare('SELECT id, name, slug FROM tenants WHERE slug = ?').bind(sub).first<any>()
+        if (tenant) c.res.headers.set('X-Tenant-Id', String(tenant.id))
+      } catch { /* tenants table may not exist */ }
+    }
+  }
+  await next()
+})
+
+// ─── Healthcheck ────────────────────────────────────────────────────────────
+app.get('/healthz', async (c) => {
+  let dbOk = false
+  try {
+    if (c.env.DB) { await c.env.DB.prepare('SELECT 1').first(); dbOk = true }
+  } catch {}
+  return c.json({
+    status: 'ok',
+    time: new Date().toISOString(),
+    bindings: {
+      db: dbOk,
+      r2: !!c.env.DOCS,
+      kv: !!c.env.RATE_LIMIT,
+      queue: !!c.env.WEBHOOK_QUEUE,
+    },
+    app: c.env.APP_VERSION || '1.0.0',
+  })
+})
+
+// ─── readyz: stricter — all critical bindings must be present ──────────────
+app.get('/readyz', async (c) => {
+  const checks = {
+    db: false,
+    secret: !!c.env.AUTH_SECRET,
+    cron_secret: !!c.env.CRON_SECRET,
+  }
+  try { if (c.env.DB) { await c.env.DB.prepare('SELECT 1').first(); checks.db = true } } catch {}
+  const ready = Object.values(checks).every(Boolean)
+  return c.json({ ready, checks }, ready ? 200 : 503)
+})
+
+// ============================================================
+// SCHEDULED + QUEUE HANDLERS (Cloudflare Workers / Pages)
+// ============================================================
+
+async function callInternal(env: Bindings, path: string, method = 'POST'): Promise<any> {
+  // Build a fake request bound to the same Worker so cron endpoints fire
+  // through the same `app` routing/middleware. We bypass the cron secret
+  // check by injecting the configured CRON_SECRET header.
+  const url = `https://internal${path}`
+  const req = new Request(url, {
+    method,
+    headers: { 'x-cron-secret': env.CRON_SECRET || '', 'content-type': 'application/json' },
+  })
+  const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any)
+  try { return await res.json() } catch { return { status: res.status } }
+}
+
+export default {
+  fetch: app.fetch.bind(app),
+
+  // CF Workers Cron Trigger handler — wired to crons in wrangler.jsonc
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    const cron = event.cron
+    ctx.waitUntil((async () => {
+      try {
+        if (cron === '0 9 * * *') {
+          await callInternal(env, '/api/cron/process-sequences')
+        } else if (cron === '0 10 * * *') {
+          await callInternal(env, '/api/cron/generate-kpis')
+        } else if (cron === '0 11 1 * *') {
+          await callInternal(env, '/api/cron/pull-reports')
+        } else if (cron === '0 12 * * *') {
+          await callInternal(env, '/api/cron/compliance-check')
+          await callInternal(env, '/api/cron/check-deadlines')
+        } else if (cron === '*/30 * * * *') {
+          await callInternal(env, '/api/cron/run-pending-analyses')
+        }
+      } catch (e) {
+        console.error('scheduled error', cron, e)
+      }
+    })())
+  },
+
+  // Queue consumer for webhook retries with exponential backoff
+  async queue(batch: MessageBatch<{ url: string; payload: any; attempts: number; secret?: string }>, env: Bindings, ctx: ExecutionContext) {
+    for (const msg of batch.messages) {
+      const body = msg.body
+      try {
+        const res = await fetch(body.url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(body.secret ? { 'x-webhook-signature': await sha256Hex(body.secret + JSON.stringify(body.payload)) } : {}),
+          },
+          body: JSON.stringify(body.payload),
+        })
+        if (!res.ok && res.status >= 500) throw new Error('upstream ' + res.status)
+        msg.ack()
+      } catch (e) {
+        const attempts = (body.attempts || 0) + 1
+        if (attempts >= 5) {
+          msg.ack() // drop after max retries; DLQ also configured in wrangler
+        } else {
+          const delaySec = Math.min(60 * Math.pow(2, attempts), 60 * 30) // 2,4,8,16,30 min cap
+          msg.retry({ delaySeconds: delaySec })
+        }
+      }
+    }
+  },
+}

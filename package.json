@@ -5,7 +5,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:quick": "npm run build && wrangler pages deploy dist --project-name rj-master-sop-2026",
+    "migrate:local": "for f in migrations/*.sql; do npx wrangler d1 execute rj-sop-operations --local --file \"$f\"; done",
+    "migrate:remote": "for f in migrations/*.sql; do npx wrangler d1 execute rj-sop-operations --remote --file \"$f\"; done",
+    "seed:local": "npx wrangler d1 execute rj-sop-operations --local --file seed.sql",
+    "seed:remote": "bash scripts/seed-remote.sh",
+    "secrets:push": "bash scripts/set-secrets.sh",
+    "smoke": "bash scripts/smoke-test.sh",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {

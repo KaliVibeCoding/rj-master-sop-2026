@@ -1,0 +1,17 @@
+/* RJ Business Solutions — Mobile Responsive Overrides */
+@media (max-width: 640px) {
+  .dashboard-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; flex-wrap: nowrap !important; }
+  .dashboard-nav button { flex-shrink: 0; }
+  .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr) !important; gap: 0.75rem; }
+  .stats-grid > div { margin: 0 !important; }
+  .tab-content table { font-size: 0.75rem; }
+  .tab-content table th, .tab-content table td { padding: 0.4rem 0.5rem; }
+  .section-body { padding: 0.75rem !important; }
+  h1 { font-size: 1.25rem !important; }
+  .score-pill { min-width: 70px; padding: 0.75rem 1rem; }
+  .score-pill .text-3xl { font-size: 1.5rem; }
+}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  nav a, nav button { font-size: 0.75rem !important; padding: 0.375rem 0.625rem !important; }
+}
